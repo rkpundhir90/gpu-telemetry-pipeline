@@ -1,0 +1,86 @@
+basePath: /
+definitions:
+  internal_api.ErrorResponse:
+    properties:
+      error:
+        type: string
+    type: object
+info:
+  contact: {}
+  description: REST API exposing GPU telemetry collected from an elastic streaming
+    pipeline.
+  title: GPU Telemetry Pipeline API
+  version: "1.0"
+paths:
+  /api/v1/gpus:
+    get:
+      description: Returns every GPU for which telemetry data has been collected.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: string
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_api.ErrorResponse'
+      summary: List all GPUs
+      tags:
+      - gpus
+  /api/v1/gpus/{id}/telemetry:
+    get:
+      description: Returns telemetry for a specific GPU ordered by time, with optional
+        inclusive time-window filters.
+      parameters:
+      - description: GPU UUID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Inclusive lower bound (RFC3339, e.g. 2025-07-18T20:42:34Z)
+        in: query
+        name: start_time
+        type: string
+      - description: Inclusive upper bound (RFC3339)
+        in: query
+        name: end_time
+        type: string
+      - description: Max rows to return
+        in: query
+        name: limit
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: string
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/internal_api.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/internal_api.ErrorResponse'
+      summary: Query telemetry by GPU
+      tags:
+      - telemetry
+  /healthz:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Liveness/readiness probe
+      tags:
+      - system
+swagger: "2.0"

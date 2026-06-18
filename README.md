@@ -1,197 +1,100 @@
 # Elastic GPU Telemetry Pipeline with a Custom Message Queue
 
-An elastic, horizontally-scalable telemetry pipeline for an AI/GPU cluster. It
-streams GPU telemetry (DCGM exporter CSV) through a **custom message queue**
-(no Kafka/RabbitMQ/etc.), persists it to PostgreSQL, and exposes it over a REST
-API with an auto-generated OpenAPI spec. Everything is containerised and
-deployed to Kubernetes (minikube) with a single Helm chart, and every workflow
-is driven by `make`.
+An elastic, horizontally-scalable telemetry pipeline for an AI/GPU cluster. The
+goal is to stream GPU telemetry (DCGM exporter CSV) through a **custom message
+queue** (no Kafka/RabbitMQ/etc.), persist it, and expose it over a REST API with
+an auto-generated OpenAPI spec.
 
-> **Status:** initial structure & layout. The codebase compiles, is unit-tested
-> (`make test`, ~83% coverage over `internal/...` — `make cover-check` enforces
-> ≥80%), lints as a Helm chart, and ships a generated OpenAPI spec. See
-> [docs/DESIGN.md](docs/DESIGN.md) for design rationale and known limitations.
+> **Status — early stage.** This repository currently contains the REST API
+> layer (Gin), the Swagger/OpenAPI wiring, and the reference data. The broader
+> pipeline (message queue, collectors, database, and Kubernetes packaging) is
+> planned and will be added over time. This README describes **what exists
+> today** and will grow as the project does.
 
 ## Table of contents
-- [System architecture](#system-architecture)
-- [Tech stack](#tech-stack)
-- [Repository layout](#repository-layout)
-- [Prerequisites](#prerequisites)
-- [Build & test](#build--test)
-- [Run locally (no Kubernetes)](#run-locally-no-kubernetes)
-- [Deploy to minikube](#deploy-to-minikube)
+- [What's in the repo today](#whats-in-the-repo-today)
+- [Tech stack (today)](#tech-stack-today)
 - [REST API](#rest-api)
-- [Configuration](#configuration)
+- [OpenAPI / Swagger](#openapi--swagger)
+- [Reference data](#reference-data)
+- [Build](#build)
+- [Roadmap](#roadmap)
 - [AI assistance](#ai-assistance)
 
-## System architecture
-
-Streamers replay the CSV and **publish** to the broker; collectors **consume**
-and persist to Postgres; the API gateway serves the data. Streamers and
-collectors scale independently (the brief caps them at 10).
+## What's in the repo today
 
 ```
-Streamer(s) ──publish──▶  Broker (custom MQ)  ──poll/commit──▶  Collector(s) ──▶ Postgres ──▶ API Gateway ──▶ REST/OpenAPI
+internal/api/         REST API layer (Gin)
+  handler.go            request handlers + OpenAPI annotations
+  router.go             routes, structured logging, Swagger UI route
+Makefile              `make openapi` to (re)generate the OpenAPI spec
+go.mod / go.sum       Go module (module gpu-telemetry-pipeline)
+project_docs/
+  AI_PROMPTS.md         how AI assistance was used
+  dcgm_metrics_*.csv    sample DCGM telemetry data
+  GPU Telemetry Pipeline Message Queue.pdf   the project brief
+PROJECT_SETUP.md      bootstrap steps
+README.md             this file
 ```
 
-Full diagram and component table: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
-Design considerations (queue semantics, scaling, availability, trade-offs):
-[docs/DESIGN.md](docs/DESIGN.md).
+## Tech stack (today)
 
-## Tech stack
-
-- **Language:** Go 1.25
+- **Language:** Go 1.26
 - **HTTP/REST:** [Gin](https://github.com/gin-gonic/gin)
-- **ORM / DB:** [GORM](https://gorm.io) + **PostgreSQL**
-- **OpenAPI:** [swaggo/swag](https://github.com/swaggo/swag) (spec generated from handler annotations)
-- **Message queue:** custom, minimal competing-consumers work queue (this repo)
-- **Packaging:** Docker (distroless runtime), Helm, minikube
-- **Tooling:** `make` for every workflow
-
-## Repository layout
-
-```
-cmd/{broker,streamer,collector,apigateway}   service entrypoints
-internal/
-  telemetry/      domain model + DCGM CSV parser
-  mq/{protocol,broker,client}   custom message queue
-  store/          Repository interface + GORM/Postgres + in-memory fake
-  streamer/ collector/ api/     service logic (Gin handlers in api/)
-  config/ observability/        env config + structured logging
-api/openapi/      generated OpenAPI (swagger.json/yaml)
-deploy/docker/    one parameterised multi-stage Dockerfile
-deploy/helm/      Helm chart for the full stack
-docs/             ARCHITECTURE, DESIGN, AI_USAGE
-```
-
-## Prerequisites
-
-| Tool      | Why                          | Notes |
-|-----------|------------------------------|-------|
-| Go 1.25+  | build/test                   | required |
-| make      | command runner               | on Windows use Git Bash, WSL, or `choco install make` |
-| Docker    | build images                 | required for deploy |
-| minikube  | local Kubernetes             | required for deploy |
-| helm 3    | install the chart            | required for deploy |
-| swag      | regenerate OpenAPI           | `make swag-install` |
-
-## Build & test
-
-```bash
-make help            # list all targets
-make build           # build all four service binaries into bin/
-make test            # run unit tests
-make test-coverage   # run tests + print total coverage % (internal/...)
-make cover-check     # fail if coverage drops below 80%
-make cover-html      # write coverage.html
-make check           # fmt + vet + test
-make openapi         # regenerate api/openapi from handler annotations
-```
-
-## Run locally (no Kubernetes)
-
-You need a Postgres reachable via the `DB_*` env vars (see
-[Configuration](#configuration)). In separate terminals:
-
-```bash
-# 1. Broker (custom message queue)
-make run-broker
-
-# 2. Streamer (point it at the sample CSV)
-MQ_BROKER_URL=http://localhost:8080 \
-CSV_PATH=dcgm_metrics_20250718_134233.csv \
-  make run-streamer
-
-# 3. Collector (writes to Postgres)
-MQ_BROKER_URL=http://localhost:8080 \
-DB_HOST=localhost DB_USER=telemetry DB_PASSWORD=telemetry DB_NAME=telemetry \
-  make run-collector
-
-# 4. API gateway
-DB_HOST=localhost DB_USER=telemetry DB_PASSWORD=telemetry DB_NAME=telemetry \
-  make run-api
-
-curl http://localhost:8081/api/v1/gpus
-```
-
-## Deploy to minikube
-
-```bash
-make minikube-start         # start the cluster
-make deploy                 # build images INTO minikube + helm install
-make minikube-load-data     # copy the CSV into a streamer pod's data volume
-make port-forward           # forward the API to localhost:8081
-```
-
-Then:
-
-```bash
-curl http://localhost:8081/api/v1/gpus
-open  http://localhost:8081/swagger/index.html   # Swagger UI
-```
-
-Scale each component independently (streamers/collectors capped at 10 per brief):
-
-```bash
-kubectl scale deploy/gtp-gpu-telemetry-pipeline-streamer  --replicas=5
-kubectl scale deploy/gtp-gpu-telemetry-pipeline-collector --replicas=5
-
-# The broker is a scalable StatefulSet of independent shards. After scaling,
-# re-render config so clients learn the new shard endpoints:
-helm upgrade gtp deploy/helm/gpu-telemetry-pipeline --reuse-values --set broker.replicas=3
-```
-
-Inspect queue depth / consumer lag:
-
-```bash
-make port-forward-broker
-curl http://localhost:8080/stats
-```
-
-Tear down: `make helm-uninstall`.
+- **OpenAPI:** [swaggo/swag](https://github.com/swaggo/swag) + gin-swagger (spec
+  generated from handler annotations)
 
 ## REST API
 
-Base path `/api/v1`. Full spec: [api/openapi/swagger.yaml](api/openapi/swagger.yaml),
-served live at `/swagger/index.html`.
+Base path `/api/v1`. The handlers and routes defined today:
 
-| Method & path                                   | Description                                  |
-|-------------------------------------------------|----------------------------------------------|
-| `GET /api/v1/gpus`                              | List all GPUs that have reported telemetry.  |
-| `GET /api/v1/gpus/{id}/telemetry`              | All telemetry for a GPU, ordered by time.    |
-| `GET /api/v1/gpus/{id}/telemetry?start_time=…&end_time=…` | Same, filtered to an inclusive RFC3339 window. |
-| `GET /healthz`                                  | Liveness/readiness probe.                    |
+| Method & path | Description |
+|---|---|
+| `GET /api/v1/gpus` | List all GPUs that have reported telemetry. |
+| `GET /api/v1/gpus/{id}/telemetry` | All telemetry for a GPU, ordered by time. |
+| `GET /api/v1/gpus/{id}/telemetry?start_time=…&end_time=…&limit=…` | Same, filtered to an inclusive RFC3339 time window with an optional row limit. |
+| `GET /healthz` | Liveness/readiness probe. |
+| `GET /swagger/*any` | Swagger UI and the raw OpenAPI spec. |
 
-Example:
+## OpenAPI / Swagger
+
+The OpenAPI spec is generated from the annotations on the handlers (the source
+of truth), rather than maintained by hand:
 
 ```bash
-curl "http://localhost:8081/api/v1/gpus/GPU-5fd4f087-86f3-7a43-b711-4771313afc50/telemetry?start_time=2025-07-18T20:00:00Z&end_time=2025-07-18T21:00:00Z"
+make openapi
 ```
 
-## Configuration
+The Swagger UI is wired into the router and served at `/swagger/index.html`,
+with the raw spec at `/swagger/doc.json`.
 
-All configuration is via environment variables (12-factor; Helm injects them
-through a ConfigMap/Secret). Key variables and defaults:
+## Reference data
 
-| Variable               | Default                  | Used by        |
-|------------------------|--------------------------|----------------|
-| `MQ_BROKER_URL`        | `http://localhost:8080`  | streamer, collector (comma-separated list of broker shard endpoints) |
-| `MQ_TOPIC`             | `gpu.telemetry`          | streamer, collector |
-| `MQ_LISTEN_ADDR`       | `:8080`                  | broker         |
-| `MQ_LEASE_TTL`         | `30s`                    | broker (redelivery window for un-acked messages) |
-| `MQ_MAX_DEPTH`         | `1000000`                | broker (max retained messages per topic; bounds memory) |
-| `CSV_PATH`             | `/data/dcgm_metrics.csv` | streamer       |
-| `STREAM_INTERVAL`      | `1s`                     | streamer       |
-| `STREAM_BATCH_SIZE`    | `100`                    | streamer       |
-| `STREAM_LOOP`          | `true`                   | streamer       |
-| `COLLECT_BATCH_SIZE`   | `256`                    | collector      |
-| `API_LISTEN_ADDR`      | `:8081`                  | api gateway    |
-| `DB_HOST/PORT/USER/PASSWORD/NAME/SSLMODE` | localhost/5432/telemetry/telemetry/telemetry/disable | collector, api |
-| `LOG_LEVEL` / `LOG_FORMAT` | `info` / `json`      | all            |
+- [`project_docs/dcgm_metrics_20250718_134233.csv`](project_docs/dcgm_metrics_20250718_134233.csv)
+  — a sample of DCGM exporter telemetry used as the input data set.
+- [`project_docs/GPU Telemetry Pipeline Message Queue.pdf`](project_docs/GPU%20Telemetry%20Pipeline%20Message%20Queue.pdf)
+  — the project brief.
+
+## Build
+
+Requires Go 1.26+.
+
+```bash
+go build ./...
+```
+
+## Roadmap
+
+The following are part of the project's goal and will be added over time:
+
+- A **custom message queue** (competing-consumers work queue) — no Kafka/RabbitMQ.
+- **Streamer** and **collector** services that replay the CSV and persist telemetry.
+- A **persistence layer** (database) behind the API.
+- **Containerisation and Kubernetes (minikube) deployment** via Helm.
+- Unit tests and coverage gating.
 
 ## AI assistance
 
 This repository's initial structure was scaffolded with Claude Code. A detailed
-account of the prompts used, what AI accelerated, and where it fell short (a real
-offset-0 bug caught by the generated tests, the `swag init` correction, and the
-CSV-delivery design change) is in [docs/AI_USAGE.md](docs/AI_USAGE.md).
+account of the prompts used and where AI needed manual intervention is in
+[project_docs/AI_PROMPTS.md](project_docs/AI_PROMPTS.md).
