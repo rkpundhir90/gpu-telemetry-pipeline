@@ -1,0 +1,41 @@
+# syntax=docker/dockerfile:1
+
+# Dedicated image for the Telemetry Collector. Kept separate from the API image
+# so the two services are versioned, deployed, and (most importantly) scaled
+# independently — the collector fans out with load via its own Deployment/HPA,
+# while the API scales on request traffic.
+#
+# Build from the repository root so the Go module is in the build context:
+#   docker build -f deploy/build/Dockerfile.collector -t gpu-telemetry-collector:0.1.0 .
+# (or simply `make docker-build-collector`).
+
+# ---- build stage ---------------------------------------------------------
+FROM golang:1.26-alpine AS build
+
+WORKDIR /src
+
+# Download dependencies first so they are cached independently of source changes.
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
+
+# Build a fully static, stripped binary for the collector. CGO is disabled so the
+# binary runs on the distroless-static base; this is also why the Kafka client is
+# the pure-Go segmentio/kafka-go and the Postgres driver is pgx (no librdkafka,
+# no libpq).
+COPY . .
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -trimpath -ldflags="-s -w" -o /out/collector ./cmd/collector
+
+# ---- runtime stage -------------------------------------------------------
+# distroless static + nonroot: no shell, no package manager, runs as uid 65532.
+FROM gcr.io/distroless/static-debian12:nonroot
+
+WORKDIR /
+COPY --from=build /out/collector /collector
+
+# Liveness/readiness probes are served here (COLLECTOR_HEALTH_ADDR, default :8081).
+EXPOSE 8081
+USER 65532:65532
+ENTRYPOINT ["/collector"]

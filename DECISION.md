@@ -1,0 +1,289 @@
+# Design Decisions
+
+This document records the significant architecture and tooling decisions for the
+GPU Telemetry Pipeline, and the reasoning behind each. It is written as a set of
+lightweight ADRs (Architecture Decision Records): each one captures the
+**context**, the **decision**, the **alternatives considered**, and the
+**consequences**.
+
+## Table of contents
+
+1. [Persistence: PostgreSQL + TimescaleDB vs MongoDB](#1-persistence-postgresql--timescaledb-vs-mongodb)
+2. [Message queue: Kafka first, behind an interface](#2-message-queue-kafka-first-behind-an-interface)
+3. [Build & developer workflow: the Makefile](#3-build--developer-workflow-the-makefile)
+4. [Deployment: Helm charts on minikube](#4-deployment-helm-charts-on-minikube)
+
+---
+
+## 1. Persistence: PostgreSQL + TimescaleDB vs MongoDB
+
+**Status:** Accepted
+
+### Context
+
+The pipeline ingests GPU telemetry (DCGM exporter metrics) as a high-rate,
+append-heavy stream of timestamped datapoints. The API must answer two
+time-series questions:
+
+- *List all GPUs* for which telemetry exists.
+- *Telemetry for a GPU, ordered by time*, with optional inclusive `start_time` /
+  `end_time` window filters.
+
+So the workload is: **write a lot, in time order; read back per-GPU slices over
+time ranges.** That is a textbook time-series access pattern.
+
+### Workload data (measured from the sample dataset)
+
+The numbers below are measured from the provided sample
+(`project_docs/dcgm_metrics_20250718_134233.csv`). The Streamer replays this data
+in a loop to simulate a continuous stream, so the cardinality is representative
+of steady state.
+
+| Property | Value (sample) | Why it matters for the store |
+|---|---|---|
+| Rows in sample | 2,470 | One row = one datapoint = one insert. |
+| Distinct metrics | 10 (`DCGM_FI_DEV_GPU_UTIL`, `_FB_USED`, `_POWER_USAGE`, …) | Fixed, well-typed columns → a relational schema fits. |
+| Distinct GPUs (UUIDs) | 247 | The natural partition/lookup key; the API queries *by* this. |
+| Distinct hosts | 31 (× 8 GPUs each) | Confirms UUID — not `gpu_id` (0–7, host-local) — is the global key. |
+| Cadence | ~1 sample/second/series | High write rate, strictly time-ordered. |
+| **Unique time series** | **247 GPUs × 10 metrics = 2,470** | Series cardinality the index/partitioning must serve. |
+
+**Volume projection at 1 Hz** (the streaming cadence): 2,470 datapoints/second ≈
+**213 million rows/day**. At a few hundred bytes/row that is tens of GB/day of
+*raw* telemetry, growing without bound. A store for this data needs **automatic
+time-partitioning, compression, and retention** to stay healthy — exactly what a
+TimescaleDB hypertable provides out of the box, and exactly what a general-purpose
+document store makes the operator build and manage by hand.
+
+### Decision
+
+Persist telemetry in **PostgreSQL with the TimescaleDB extension**, accessed via
+the pure-Go **pgx** driver, behind a `store.TelemetryStore` interface.
+
+The telemetry table is promoted to a TimescaleDB **hypertable** partitioned by
+`time`, with a `(uuid, time DESC)` index serving the API's primary query and a
+unique `(uuid, metric_name, time)` key providing insert idempotency.
+
+### Why TimescaleDB over MongoDB
+
+| Concern | PostgreSQL + TimescaleDB | MongoDB |
+|---|---|---|
+| **Time-series fit** | Purpose-built: automatic time partitioning (hypertables/chunks), `time_bucket()` downsampling, continuous aggregates, native retention/compression policies. | Time-series collections exist, but the feature set is younger and less expressive for windowed analytics. |
+| **Query model** | SQL — time-window filters, ordering, and future aggregations (avg/max utilisation, percentiles) are natural and declarative. | Aggregation-pipeline syntax; windowed time queries are more verbose. |
+| **Schema** | Telemetry is uniform and well-typed (a fixed set of DCGM fields) — a relational schema documents and enforces the shape. | Schema-flexibility is a strength for irregular documents, which this data is not. |
+| **Idempotency** | `UNIQUE (uuid, metric_name, time)` + `ON CONFLICT DO NOTHING` gives exactly-once *effect* under at-least-once delivery, in one statement. | Achievable via unique indexes + upserts, but less ergonomic for the batched-insert path. |
+| **Operational maturity** | Decades of Postgres tooling, backups, and operators; TimescaleDB is a standard extension. | Mature, but adds a second operational model alongside a relational API. |
+| **Static binary** | pgx is pure Go → links with `CGO_ENABLED=0` into the distroless-static image. | The official driver is also pure Go; not a differentiator. |
+
+The deciding factor is **fit for purpose**: this is a time-series problem, and
+TimescaleDB is a time-series database that still gives us the full power of SQL
+for the API's current and future queries (rollups, percentiles, retention).
+
+**How TimescaleDB features map to the measured workload:**
+
+- **213M rows/day → hypertable chunks.** Time-partitioning keeps each chunk
+  small, so inserts touch a hot recent chunk and time-window reads prune to a few
+  chunks instead of scanning the whole table.
+- **Tens of GB/day → native compression + retention policies.** Old chunks
+  compress (columnar, ~10× typical on metric data) and expire automatically — no
+  cron jobs or manual archival.
+- **2,470 series, queried per-GPU → the `(uuid, time DESC)` index.** Directly
+  serves *"telemetry for GPU X, ordered by time, within [start,end]"* as an index
+  range scan.
+- **`GET /api/v1/gpus` → `SELECT DISTINCT uuid`,** with continuous aggregates
+  available later to make dashboards (avg/max utilisation per minute) cheap.
+
+> **Note on the change mid-build.** The repository initially vendored a MongoDB
+> driver. The persistence target was switched to PostgreSQL/TimescaleDB partway
+> through the Collector work. Because all persistence sits behind the
+> `store.TelemetryStore` interface, **only the implementation changed** — the
+> Collector engine and the queue layer were untouched. That is the abstraction
+> paying for itself.
+
+### Consequences
+
+- **Positive:** SQL queries for the API; automatic time partitioning; built-in
+  retention/compression as data grows; idempotent writes in a single statement.
+- **Positive:** The `TelemetryStore` interface keeps the door open to another
+  backend if requirements change.
+- **Trade-off:** Requires the `timescaledb` extension. We degrade gracefully —
+  if the extension is absent the table still works as plain PostgreSQL (with a
+  B-tree index and a logged warning), so the pipeline remains runnable.
+
+---
+
+## 2. Message queue: Kafka first, behind an interface
+
+**Status:** Accepted (interim — Kafka is a staging/testing choice)
+
+### Context
+
+The project brief's **end goal is a *custom* message queue** (explicitly *not*
+Kafka/RabbitMQ/etc.). But building the custom queue and the Collector at the same
+time would mean validating two unproven things against each other, with no known-
+good reference to isolate bugs.
+
+We need to prove out the **complete end-to-end flow** first — Streamer →
+queue → Collector → TimescaleDB → API — with competing-consumer scaling,
+at-least-once delivery, offset commits, and rebalancing all behaving correctly.
+
+### Decision
+
+Use **Kafka as the interim queue for staging and testing**, so we can exercise
+and validate the full pipeline against a battle-tested, well-understood broker.
+Crucially, the Collector depends only on a small **`queue.Consumer` interface**,
+never on Kafka directly. Kafka lives behind that interface in
+`internal/queue/kafka`.
+
+This means:
+
+- **Now:** Kafka lets us test the whole flow — partitioning by GPU UUID,
+  consumer-group rebalancing on scale up/down, manual offset commits, and
+  at-least-once semantics — with confidence that the broker itself is correct.
+- **Later:** the custom message queue becomes **one more implementation** of
+  `queue.Consumer`. Swapping it in is additive; the Collector, batching logic,
+  and delivery semantics do not change.
+
+### What "end-to-end" validation covers
+
+Standing the flow up on Kafka first lets us prove each pipeline property against a
+correct reference, so any failure is unambiguously *our* bug, not the broker's.
+The behaviours validated — and how the dataset exercises them:
+
+| Property | How Kafka lets us validate it | Tied to the data |
+|---|---|---|
+| **Throughput** | Sustain the ~2,470 msg/s ingest cadence end-to-end. | Matches the sample's series count at 1 Hz. |
+| **Ordering per GPU** | Partition by `uuid` → all of a GPU's datapoints land on one partition, consumed in order. | 247 UUIDs spread evenly across the topic's partitions. |
+| **Horizontal scaling** | Add/remove collectors in one consumer group; watch partitions rebalance. | Topic provisioned with 10 partitions = the brief's 10-instance cap. |
+| **At-least-once + idempotency** | Kill a collector mid-batch; confirm redelivery and that `ON CONFLICT DO NOTHING` prevents duplicate rows. | Re-streamed rows must not double-count in TimescaleDB. |
+| **Backpressure / batching** | Verify batch flush by size and by interval under load. | 2,470 msg/s fills 500-row batches ~5×/s. |
+
+Once these hold on Kafka, the custom queue is validated against the *same* assertions
+— a like-for-like swap behind `queue.Consumer`, not a leap of faith.
+
+### Alternatives considered
+
+- **Build the custom queue first.** Rejected for now: no reference to validate
+  the Collector against, so any bug is ambiguous (queue or collector?). Kafka
+  removes that ambiguity.
+- **Couple the Collector directly to a Kafka client.** Rejected: it would make
+  the brief's required custom-queue swap a rewrite instead of a drop-in.
+
+### Consequences
+
+- **Positive:** The complete flow can be staged and tested today on a proven
+  broker; the Kafka client (`segmentio/kafka-go`) is pure Go, so it fits the
+  static distroless image.
+- **Positive:** The interface boundary is the design insight that satisfies both
+  "use Kafka for now" and the brief's "build a custom queue".
+- **Trade-off / follow-up:** Kafka is interim. The custom `queue.Consumer`
+  implementation (and a matching producer for the Streamer) is the next step
+  toward the brief's actual requirement.
+
+---
+
+## 3. Build & developer workflow: the Makefile
+
+**Status:** Accepted
+
+### Context
+
+The stack has multiple services (API, Collector), two container images, two Helm
+charts, OpenAPI generation, tests with coverage, and a minikube deploy flow.
+These are multi-step, easy-to-get-wrong commands with specific flags and ordering
+(e.g. the namespace must exist before Helm installs into it).
+
+### Decision
+
+Centralise every workflow as a **Makefile target**, so each operation is a
+single, self-documenting command with the correct flags baked in.
+
+### Benefits
+
+- **One canonical way to do each thing.** `make deploy`, `make deploy-collector`,
+  `make cover`, `make openapi` — no one has to remember long `docker`/`helm`/
+  `kubectl` incantations or their correct order.
+- **Encodes ordering and dependencies.** Targets compose (`deploy` runs
+  build → load → namespace → install in the right sequence), so the
+  "namespace-before-install" requirement can't be forgotten.
+- **Required by the brief, and satisfied here.** The brief mandates generating
+  the OpenAPI spec via a Make command (`make openapi`) and measuring code
+  coverage via the Makefile (`make cover` prints a `COVERAGE_TOTAL` line a CI
+  gate can grep; `make cover-html` produces a browsable report).
+- **CI-friendly.** The same targets developers run locally are what CI runs, so
+  "works on my machine" gaps shrink.
+- **Discoverable.** The targets double as documentation of the project's
+  operations; the README's "Make targets" table is essentially the interface.
+- **Environment-overridable.** Image names, tags, namespace, and chart dirs are
+  `?=` variables, so the same targets work across environments without edits
+  (e.g. `make docker-build TAG=1.2.3`).
+
+### Consequences
+
+- **Positive:** Low-friction, reproducible workflows for build, test, coverage,
+  OpenAPI, and deploy.
+- **Trade-off:** Make is the lowest-common-denominator task runner; for very
+  complex logic a richer tool might be warranted, but the current targets are
+  simple wrappers and Make keeps the dependency surface minimal.
+
+---
+
+## 4. Deployment: Helm charts on minikube
+
+**Status:** Accepted
+
+### Context
+
+The brief requires Kubernetes deployment via Helm. Services differ in how they
+scale and what they expose: the API serves request traffic and needs a Service;
+the Collector is a queue consumer that exposes no Service but must scale with
+load. Both must meet a hardened security posture.
+
+### Decision
+
+Package each service as its **own Helm chart** (`deploy/helm/gpu-telemetry-api`
+and `deploy/helm/gpu-telemetry-collector`) and deploy onto **minikube** for local
+end-to-end testing.
+
+### Why Helm
+
+- **Parameterised, repeatable installs.** Values (replica counts, image
+  tags, Kafka/Postgres endpoints, autoscaling bounds, network-policy toggles)
+  are externalised, so the same chart serves dev, staging, and prod by swapping
+  values — no manifest forking.
+- **Templated consistency.** Shared helpers generate consistent names and labels
+  across every object, and security context, probes, and policies are defined
+  once per chart rather than copy-pasted across raw YAML.
+- **Lifecycle management.** `helm upgrade --install --wait` gives atomic,
+  idempotent rollouts (and easy rollback) instead of hand-applied `kubectl`
+  files.
+- **Separate charts = independent scaling.** The Collector chart ships a
+  `HorizontalPodAutoscaler` (2–10 replicas, the brief's cap) and its own image,
+  so it scales on load **independently of the API** — which is the headline
+  Collector requirement. Splitting the charts (and the Dockerfiles) is what makes
+  that independence real.
+
+### Why minikube
+
+- **Faithful local Kubernetes.** Exercises the *real* objects — Deployments,
+  HPA, Services, ServiceAccounts, NetworkPolicies, Pod Security Admission — not a
+  simulation, so what passes locally behaves the same on a real cluster.
+- **Tight feedback loop.** `minikube image load` runs locally-built images
+  without a registry, so the whole stage-and-test cycle stays on one machine.
+- **Security is testable, not aspirational.** We run minikube with the **Calico**
+  CNI so the chart's NetworkPolicies are actually *enforced* (the default CNI
+  ignores them). Combined with a dedicated namespace under the **restricted** Pod
+  Security Standard, a hardened container (non-root, read-only rootfs, all
+  capabilities dropped, seccomp `RuntimeDefault`), and disabled
+  ServiceAccount-token mounting, the security model can be verified end-to-end
+  before it ever reaches production.
+
+### Consequences
+
+- **Positive:** Each service deploys, scales, and is secured independently;
+  values-driven config makes promotion across environments trivial; the security
+  posture is genuinely enforced and testable locally.
+- **Trade-off:** Two charts to maintain instead of one, and Kafka/TimescaleDB are
+  expected to be provided as endpoints (via values) rather than sub-charts —
+  keeping the application charts focused on the application. The
+  `deploy/docker-compose.yaml` stack covers the batteries-included local case.

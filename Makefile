@@ -109,15 +109,33 @@ NAMESPACE ?= gpu-telemetry
 RELEASE   ?= gpu-telemetry
 CHART_DIR ?= deploy/helm/gpu-telemetry-api
 
+# Collector service: its own image and chart so it scales independently.
+COLLECTOR_IMAGE     ?= gpu-telemetry-collector
+COLLECTOR_RELEASE   ?= gpu-telemetry-collector
+COLLECTOR_CHART_DIR ?= deploy/helm/gpu-telemetry-collector
+
 .PHONY: docker-build minikube-load namespace helm-lint helm-template deploy undeploy status expose service-url
+.PHONY: docker-build-collector minikube-load-collector deploy-collector undeploy-collector
+
+# Dockerfiles live under deploy/build; the build context is the repo root (where
+# the Go module is), passed as the final ".".
+API_DOCKERFILE       ?= deploy/build/Dockerfile.api
+COLLECTOR_DOCKERFILE ?= deploy/build/Dockerfile.collector
 
 # Build the minimal, multi-stage (distroless, static) image.
 docker-build:
-	DOCKER_BUILDKIT=1 docker build -t $(IMAGE):$(TAG) .
+	DOCKER_BUILDKIT=1 docker build -f $(API_DOCKERFILE) -t $(IMAGE):$(TAG) .
 
 # Load the locally built image into the running minikube cluster.
 minikube-load: docker-build
 	minikube image load $(IMAGE):$(TAG)
+
+# ---- collector image -----------------------------------------------------
+docker-build-collector:
+	DOCKER_BUILDKIT=1 docker build -f $(COLLECTOR_DOCKERFILE) -t $(COLLECTOR_IMAGE):$(TAG) .
+
+minikube-load-collector: docker-build-collector
+	minikube image load $(COLLECTOR_IMAGE):$(TAG)
 
 # Step 1 of security: create + harden the dedicated namespace
 # (restricted Pod Security Admission).
@@ -155,7 +173,39 @@ service-url:
 expose:
 	minikube service $(RELEASE)-$(IMAGE) --namespace $(NAMESPACE)
 
+# Deploy the collector chart (expects the namespace to already exist; create it
+# with `make namespace`). Pass Kafka/Postgres endpoints via --set or values.
+deploy-collector: minikube-load-collector namespace
+	helm lint $(COLLECTOR_CHART_DIR)
+	helm upgrade --install $(COLLECTOR_RELEASE) $(COLLECTOR_CHART_DIR) \
+		--namespace $(NAMESPACE) \
+		--create-namespace=false \
+		--wait --timeout 180s
+	kubectl -n $(NAMESPACE) get deploy,pod,hpa -l app.kubernetes.io/name=gpu-telemetry-collector -o wide
+
+undeploy-collector:
+	-helm uninstall $(COLLECTOR_RELEASE) --namespace $(NAMESPACE)
+
 # Remove the release and the dedicated namespace.
 undeploy:
 	-helm uninstall $(RELEASE) --namespace $(NAMESPACE)
 	-kubectl delete -f deploy/namespace.yaml
+
+# ==========================================
+# TEST & COVERAGE
+# ==========================================
+.PHONY: test cover cover-html
+
+# Run all unit tests with the race detector.
+test:
+	go test -race ./...
+
+# Run tests and report total statement coverage (gates can grep COVERAGE_TOTAL).
+cover:
+	go test -race -covermode=atomic -coverprofile=coverage.out ./...
+	@go tool cover -func=coverage.out | tail -n 1 | awk '{print "COVERAGE_TOTAL " $$3}'
+
+# Generate a browsable HTML coverage report.
+cover-html: cover
+	go tool cover -html=coverage.out -o coverage.html
+	@echo "wrote coverage.html"

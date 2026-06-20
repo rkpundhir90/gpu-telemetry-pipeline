@@ -1,0 +1,6 @@
+apiVersion: v2
+name: gpu-telemetry-collector
+description: Horizontally-scalable Telemetry Collector that consumes GPU telemetry from Kafka and persists it to TimescaleDB.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

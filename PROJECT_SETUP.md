@@ -29,8 +29,9 @@ early end-to-end check.
 
 ## 5. Containerise the API
 
-- Add a multi-stage [`Dockerfile`](Dockerfile): build a static binary in a Go
-  stage, then copy it into a minimal `distroless/static:nonroot` runtime stage.
+- Add a multi-stage Dockerfile under [`deploy/build/`](deploy/build/): build a
+  static binary in a Go stage, then copy it into a minimal
+  `distroless/static:nonroot` runtime stage.
 - Add a [`.dockerignore`](.dockerignore) to keep the build context small.
 - Build the image: `make docker-build`.
 

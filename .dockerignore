@@ -3,9 +3,9 @@
 .gitignore
 .claude
 .dockerignore
-Dockerfile
 
-# Kubernetes / Helm (not needed in the build context)
+# Kubernetes / Helm / Dockerfiles (not needed inside the image; the Dockerfiles
+# under deploy/build are read via `docker build -f`, not copied from context)
 deploy
 
 # Docs and local assets

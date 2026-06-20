@@ -1,0 +1,25 @@
+{{ include "app.name" . }} deployed to namespace "{{ .Release.Namespace }}".
+
+Scaling:        {{ if .Values.autoscaling.enabled }}HPA enabled ({{ .Values.autoscaling.minReplicas }}-{{ .Values.autoscaling.maxReplicas }} replicas, target CPU {{ .Values.autoscaling.targetCPUUtilizationPercentage }}%){{ else }}fixed {{ .Values.replicaCount }} replicas{{ end }}
+Consumer group: {{ .Values.kafka.groupId }} (topic {{ .Values.kafka.topic }} @ {{ .Values.kafka.brokers }})
+Pod Security:   restricted (Pod Security Admission)
+NetworkPolicy:  {{ if .Values.networkPolicy.enabled }}DNS + Kafka/Postgres egress + health ingress{{ else }}disabled{{ end }}
+
+The collector is a Kafka consumer — it exposes no Service, only health probes on
+port {{ .Values.healthPort }} (/healthz, /readyz, /stats).
+
+Watch it scale and consume:
+  kubectl -n {{ .Release.Namespace }} get hpa,pods -l app.kubernetes.io/name={{ include "app.name" . }} -w
+
+Inspect throughput counters on a pod:
+  kubectl -n {{ .Release.Namespace }} port-forward deploy/{{ include "app.fullname" . }} {{ .Values.healthPort }}:{{ .Values.healthPort }}
+  curl localhost:{{ .Values.healthPort }}/stats
+
+NOTE: effective parallelism is capped by the topic's partition count — scaling
+beyond the number of partitions leaves extra replicas idle. Provision the topic
+with >= maxReplicas ({{ .Values.autoscaling.maxReplicas }}) partitions.
+{{- if .Values.autoscaling.enabled }}
+
+HPA needs metrics-server in the cluster:
+  minikube addons enable metrics-server
+{{- end }}

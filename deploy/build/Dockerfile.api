@@ -1,5 +1,10 @@
 # syntax=docker/dockerfile:1
 
+# API gateway image. Build from the repository root so the Go module is in the
+# build context:
+#   docker build -f deploy/build/Dockerfile.api -t gpu-telemetry-api:0.1.0 .
+# (or simply `make docker-build`).
+
 # ---- build stage ---------------------------------------------------------
 FROM golang:1.26-alpine AS build
 

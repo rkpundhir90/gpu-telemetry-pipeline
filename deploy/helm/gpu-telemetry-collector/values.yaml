@@ -1,0 +1,96 @@
+# ---------------------------------------------------------------------------
+# Image
+# Built locally and loaded into minikube (`make minikube-load-collector`), so we
+# must NOT try to pull it from a registry.
+# ---------------------------------------------------------------------------
+image:
+  repository: gpu-telemetry-collector
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+# Baseline replicas. When autoscaling is enabled the HPA owns the replica count
+# and this is only the starting point.
+replicaCount: 2
+
+# ---------------------------------------------------------------------------
+# Horizontal scaling (the headline requirement for the collector)
+# Collectors are competing consumers in one Kafka group, so adding replicas
+# redistributes partitions and increases throughput. The brief caps the fleet at
+# 10 instances. NOTE: useful parallelism is bounded by the topic's partition
+# count — replicas beyond the number of partitions stay idle.
+# Requires metrics-server in the cluster for CPU-based autoscaling.
+# ---------------------------------------------------------------------------
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  # targetMemoryUtilizationPercentage: 80   # optional
+
+# ---------------------------------------------------------------------------
+# Application configuration (injected as env vars; see internal/config)
+# ---------------------------------------------------------------------------
+kafka:
+  brokers: "kafka:9092"
+  topic: "gpu-telemetry"
+  groupId: "telemetry-collectors"
+
+postgres:
+  # DSN used when existingSecret is empty; a Secret is created from this value so
+  # it is not rendered in plaintext into the Deployment manifest.
+  dsn: "postgres://telemetry:telemetry@timescaledb:5432/telemetry?sslmode=disable"
+  # To supply the DSN yourself, set existingSecret (+ secretKey) and leave dsn "".
+  existingSecret: ""
+  secretKey: "dsn"
+
+collector:
+  batchSize: 500
+  flushInterval: "1s"
+  flushTimeout: "15s"
+
+# Port the collector serves liveness/readiness/stats on.
+healthPort: 8081
+
+# ---------------------------------------------------------------------------
+# Security (mirrors the API chart: satisfies the "restricted" PSS)
+# ---------------------------------------------------------------------------
+serviceAccount:
+  create: true
+  # The collector does not talk to the Kubernetes API, so never mount a token.
+  automountServiceAccountToken: false
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  capabilities:
+    drop:
+      - ALL
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# ---------------------------------------------------------------------------
+# NetworkPolicies (enforced by Calico):
+#  - default-deny all ingress + egress
+#  - allow DNS egress
+#  - allow egress to Kafka and Postgres ports
+#  - allow ingress to the health port (kubelet probes arrive from the node)
+# ---------------------------------------------------------------------------
+networkPolicy:
+  enabled: true
+  kafkaPort: 9092
+  postgresPort: 5432

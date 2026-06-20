@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"time"
 )
 
 func getenv(key, def string) string {
@@ -25,6 +26,17 @@ func getenvBool(key string, def bool) bool {
 	if v, ok := os.LookupEnv(key); ok {
 		if b, err := strconv.ParseBool(v); err == nil {
 			return b
+		}
+	}
+	return def
+}
+
+// getenvDuration parses a Go duration string (e.g. "500ms", "2s") from the
+// environment, falling back to def on absence or parse error.
+func getenvDuration(key string, def time.Duration) time.Duration {
+	if v, ok := os.LookupEnv(key); ok {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
 		}
 	}
 	return def

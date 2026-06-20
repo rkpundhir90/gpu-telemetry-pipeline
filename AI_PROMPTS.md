@@ -59,6 +59,25 @@ The prompts below are grouped by the stage of work they supported.
 
 > "Update the README, PROJECT_SETUP, and AI usage documents."
 
+### 5. The Telemetry Collector
+
+> "Now it's time to focus on the Telemetry Collector: consumes telemetry from
+> the custom message queue, parses and persists it. Support the ability to
+> dynamically scale up/down the number of Collectors. For now use Kafka; data
+> coming into the Kafka topic follows the CSV file in project_docs."
+
+> "Use the Postgres database with the TimescaleDB extension."
+
+> "This should be a separate Dockerfile, as we want to scale it up and down as
+> per the load."
+
+From these, the assistant designed and built the Collector: a shared telemetry
+record contract, a technology-agnostic `queue.Consumer` interface with a Kafka
+implementation, a `store.TelemetryStore` interface with a TimescaleDB
+implementation, the batching collector engine, a separate container image, a
+Helm chart with a HorizontalPodAutoscaler, a docker-compose dev stack, and unit
+tests with Makefile coverage targets.
+
 ## Where AI fell short
 
 AI accelerated the work, but its output was not accepted blindly. Items that
@@ -93,6 +112,24 @@ required manual intervention or human course-correction:
 9. **A course-correction on how to expose the service.** The assistant's first
    approach used a custom forwarding script; on feedback, this was replaced with
    minikube's own built-in commands for accessing cluster services.
+
+**During the Collector build**
+
+10. **Conflicting requirements, reconciled by design.** The brief forbids
+    off-the-shelf queues, but the instruction was to "use Kafka for now". Rather
+    than pick one, the assistant put the queue behind a small interface so Kafka
+    is a swappable implementation and the eventual custom queue is a drop-in.
+11. **A persistence change mid-build.** The driver already vendored pointed at
+    MongoDB; the human redirected to PostgreSQL/TimescaleDB partway through. Only
+    the implementation behind the storage interface changed — the interface and
+    collector were untouched, validating the abstraction.
+12. **A packaging course-correction.** The assistant's first move folded the
+    collector into the existing image via a build argument; on feedback this was
+    split into a dedicated `Dockerfile.collector` so the service scales as its
+    own independently-versioned image.
+13. **A toolchain/environment workaround.** The Go toolchain could not lock files
+    over the `\\wsl.localhost` share from Windows, so builds and tests were run
+    inside a `golang` container bind-mounted to the native Linux path.
 
 These corrections are the reason every AI-generated output in this project was
 reviewed before being kept.

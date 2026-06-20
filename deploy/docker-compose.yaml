@@ -1,0 +1,95 @@
+# Local development / verification stack for the Telemetry Collector.
+#
+#   docker compose -f deploy/docker-compose.yaml up --build
+#
+# Brings up:
+#   - kafka         single-node KRaft broker (internal kafka:9092, host :29092)
+#   - kafka-init    creates the topic with multiple partitions (for scale demos)
+#   - timescaledb   PostgreSQL 16 + TimescaleDB
+#   - collector     the Telemetry Collector (scale: `--scale collector=3`)
+#
+# There is no Streamer yet, so the collector idles until something produces to
+# the topic. To watch it persist, scale up collectors and produce test messages
+# (or run the future Streamer) to the "gpu-telemetry" topic.
+services:
+  kafka:
+    image: apache/kafka:3.8.0
+    container_name: gpu-telemetry-kafka
+    ports:
+      - "29092:29092" # host access (e.g. a streamer or test run on the host)
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:29092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  kafka-init:
+    image: apache/kafka:3.8.0
+    container_name: gpu-telemetry-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    # 10 partitions so up to 10 collectors (the brief's cap) each get one.
+    command: >
+      /opt/kafka/bin/kafka-topics.sh
+      --bootstrap-server kafka:9092
+      --create --if-not-exists
+      --topic gpu-telemetry
+      --partitions 10
+      --replication-factor 1
+    restart: "no"
+
+  timescaledb:
+    image: timescale/timescaledb:2.17.2-pg16
+    container_name: gpu-telemetry-timescaledb
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: telemetry
+      POSTGRES_PASSWORD: telemetry
+      POSTGRES_DB: telemetry
+    volumes:
+      - timescale-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U telemetry -d telemetry"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  collector:
+    build:
+      context: ..
+      dockerfile: deploy/build/Dockerfile.collector
+    image: gpu-telemetry-collector:dev
+    depends_on:
+      kafka:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKERS: "kafka:9092"
+      KAFKA_TOPIC: "gpu-telemetry"
+      KAFKA_GROUP_ID: "telemetry-collectors"
+      POSTGRES_DSN: "postgres://telemetry:telemetry@timescaledb:5432/telemetry?sslmode=disable"
+      COLLECTOR_BATCH_SIZE: "500"
+      COLLECTOR_FLUSH_INTERVAL: "1s"
+      COLLECTOR_HEALTH_ADDR: ":8081"
+    # No host port published: scaling (`--scale collector=N`) would collide on a
+    # fixed host port. Use `docker compose exec` or the k8s deploy to scrape /stats.
+
+volumes:
+  timescale-data:
