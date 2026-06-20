@@ -1,0 +1,38 @@
+# syntax=docker/dockerfile:1
+
+# Dedicated image for the Telemetry Streamer. Kept separate from the collector
+# and API images so the three services are versioned, deployed, and scaled
+# independently. The telemetry CSV is NOT baked into the image: it is mounted at
+# runtime (a PersistentVolume in k8s, a bind mount in compose) and read via
+# STREAMER_CSV_PATH, so the dataset is provisioned independently of the image.
+#
+# Build from the repository root so the Go module is in the build context:
+#   docker build -f deploy/build/Dockerfile.streamer -t gpu-telemetry-streamer:0.1.0 .
+# (or simply `make docker-build-streamer`).
+
+FROM golang:1.26-alpine AS build
+
+WORKDIR /src
+
+# Download dependencies first so they are cached independently of source changes.
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
+
+# Build a fully static, stripped binary for the streamer. CGO is disabled so the
+# binary runs on the distroless-static base.
+COPY . .
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -trimpath -ldflags="-s -w" -o /out/streamer ./cmd/streamer
+
+# distroless static + nonroot: no shell, no package manager, runs as uid 65532.
+FROM gcr.io/distroless/static-debian12:nonroot
+
+WORKDIR /
+COPY --from=build /out/streamer /streamer
+
+# Liveness/readiness probes are served here (STREAMER_HEALTH_ADDR, default :8082).
+EXPOSE 8082
+USER 65532:65532
+ENTRYPOINT ["/streamer"]

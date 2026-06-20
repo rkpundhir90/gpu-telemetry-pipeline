@@ -6,11 +6,13 @@
 #   - kafka         single-node KRaft broker (internal kafka:9092, host :29092)
 #   - kafka-init    creates the topic with multiple partitions (for scale demos)
 #   - timescaledb   PostgreSQL 16 + TimescaleDB
+#   - streamer      the Telemetry Streamer (scale: `--scale streamer=3`)
 #   - collector     the Telemetry Collector (scale: `--scale collector=3`)
+#   - api           the REST API + Swagger UI (host :8080)
 #
-# There is no Streamer yet, so the collector idles until something produces to
-# the topic. To watch it persist, scale up collectors and produce test messages
-# (or run the future Streamer) to the "gpu-telemetry" topic.
+# The streamer replays its CSV onto the topic, the collector persists it, and the
+# api serves it back over REST. Scale streamer/collector independently to watch
+# the pipeline elastically absorb load, e.g. `--scale streamer=3 --scale collector=3`.
 services:
   kafka:
     image: apache/kafka:3.8.0
@@ -70,6 +72,28 @@ services:
       timeout: 5s
       retries: 10
 
+  streamer:
+    build:
+      context: ..
+      dockerfile: deploy/build/Dockerfile.streamer
+    image: gpu-telemetry-streamer:dev
+    depends_on:
+      kafka:
+        condition: service_healthy
+    # Mount the CSV at runtime (read-only), mirroring the PVC mount used in k8s;
+    # the data is not baked into the image.
+    volumes:
+      - ../project_docs/dcgm_metrics_20250718_134233.csv:/data/dcgm_metrics.csv:ro
+    environment:
+      KAFKA_BROKERS: "kafka:9092"
+      KAFKA_TOPIC: "gpu-telemetry"
+      STREAMER_CSV_PATH: "/data/dcgm_metrics.csv"
+      STREAMER_INTERVAL: "10ms"
+      STREAMER_LOOP: "true"
+      STREAMER_HEALTH_ADDR: ":8082"
+    # No host port published: scaling (`--scale streamer=N`) would collide on a
+    # fixed host port.
+
   collector:
     build:
       context: ..
@@ -90,6 +114,20 @@ services:
       COLLECTOR_HEALTH_ADDR: ":8081"
     # No host port published: scaling (`--scale collector=N`) would collide on a
     # fixed host port. Use `docker compose exec` or the k8s deploy to scrape /stats.
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/build/Dockerfile.api
+    image: gpu-telemetry-api:dev
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    ports:
+      - "8080:8080" # REST API + Swagger UI on the host (http://localhost:8080)
+    environment:
+      API_LISTEN_ADDR: ":8080"
+      POSTGRES_DSN: "postgres://telemetry:telemetry@timescaledb:5432/telemetry?sslmode=disable"
 
 volumes:
   timescale-data:

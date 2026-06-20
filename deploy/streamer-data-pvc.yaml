@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gpu-telemetry-streamer-data
+  namespace: gpu-telemetry
+  labels:
+    app.kubernetes.io/part-of: gpu-telemetry-pipeline
+spec:
+  # ReadWriteOnce is enough on single-node minikube: every Streamer replica is
+  # scheduled on the one node and shares this volume (mounted read-only in the
+  # pod). The CSV is loaded onto it once via `make load-streamer-data`.
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 128Mi

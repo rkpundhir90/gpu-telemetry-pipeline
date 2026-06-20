@@ -28,6 +28,11 @@ spec:
           env:
             - name: API_LISTEN_ADDR
               value: {{ .Values.listenAddr | quote }}
+            - name: POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "app.dsnSecretName" . }}
+                  key: {{ .Values.postgres.secretKey }}
           ports:
             - name: http
               containerPort: {{ .Values.containerPort }}
@@ -40,7 +45,7 @@ spec:
             periodSeconds: 10
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: http
             initialDelaySeconds: 2
             periodSeconds: 5

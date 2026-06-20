@@ -12,6 +12,7 @@ lightweight ADRs (Architecture Decision Records): each one captures the
 2. [Message queue: Kafka first, behind an interface](#2-message-queue-kafka-first-behind-an-interface)
 3. [Build & developer workflow: the Makefile](#3-build--developer-workflow-the-makefile)
 4. [Deployment: Helm charts on minikube](#4-deployment-helm-charts-on-minikube)
+5. [Telemetry Streamer: stateless replay, data on a PVC](#5-telemetry-streamer-stateless-replay-data-on-a-pvc)
 
 ---
 
@@ -104,8 +105,10 @@ for the API's current and future queries (rollups, percentiles, retention).
 
 - **Positive:** SQL queries for the API; automatic time partitioning; built-in
   retention/compression as data grows; idempotent writes in a single statement.
-- **Positive:** The `TelemetryStore` interface keeps the door open to another
-  backend if requirements change.
+- **Positive:** The store is split into a `TelemetryStore` write interface
+  (consumed by the Collector) and a `TelemetryReader` read interface (consumed by
+  the API: `ListGPUs`, `QueryTelemetry`). Each side depends only on the methods it
+  needs, and either can be re-pointed at another backend independently.
 - **Trade-off:** Requires the `timescaledb` extension. We degrade gracefully —
   if the extension is absent the table still works as plain PostgreSQL (with a
   B-tree index and a logged warning), so the pipeline remains runnable.
@@ -176,9 +179,10 @@ Once these hold on Kafka, the custom queue is validated against the *same* asser
   static distroless image.
 - **Positive:** The interface boundary is the design insight that satisfies both
   "use Kafka for now" and the brief's "build a custom queue".
-- **Trade-off / follow-up:** Kafka is interim. The custom `queue.Consumer`
-  implementation (and a matching producer for the Streamer) is the next step
-  toward the brief's actual requirement.
+- **Trade-off / follow-up:** Kafka is interim, now used by both a `queue.Consumer`
+  (Collector) and a `queue.Producer` (Streamer). The remaining step toward the
+  brief's actual requirement is a custom implementation of those two interfaces —
+  additive, with no change to the Streamer or Collector logic.
 
 ---
 
@@ -188,10 +192,12 @@ Once these hold on Kafka, the custom queue is validated against the *same* asser
 
 ### Context
 
-The stack has multiple services (API, Collector), two container images, two Helm
-charts, OpenAPI generation, tests with coverage, and a minikube deploy flow.
-These are multi-step, easy-to-get-wrong commands with specific flags and ordering
-(e.g. the namespace must exist before Helm installs into it).
+The stack has three services (API, Collector, Streamer), three container images,
+three Helm charts, a data-loading step (the Streamer's CSV onto a PVC), OpenAPI
+generation, tests with coverage, and a minikube deploy flow. These are multi-step,
+easy-to-get-wrong commands with specific flags and ordering (e.g. the namespace
+must exist before Helm installs into it; the Streamer's data PVC must be populated
+before its pods leave `Init`).
 
 ### Decision
 
@@ -201,11 +207,12 @@ single, self-documenting command with the correct flags baked in.
 ### Benefits
 
 - **One canonical way to do each thing.** `make deploy`, `make deploy-collector`,
-  `make cover`, `make openapi` — no one has to remember long `docker`/`helm`/
-  `kubectl` incantations or their correct order.
+  `make deploy-streamer`, `make cover`, `make openapi` — no one has to remember
+  long `docker`/`helm`/`kubectl` incantations or their correct order.
 - **Encodes ordering and dependencies.** Targets compose (`deploy` runs
-  build → load → namespace → install in the right sequence), so the
-  "namespace-before-install" requirement can't be forgotten.
+  build → load → namespace → install in the right sequence;
+  `deploy-streamer` loads the data PVC before installing), so requirements like
+  "namespace-before-install" and "data-before-pods" can't be forgotten.
 - **Required by the brief, and satisfied here.** The brief mandates generating
   the OpenAPI spec via a Make command (`make openapi`) and measuring code
   coverage via the Makefile (`make cover` prints a `COVERAGE_TOTAL` line a CI
@@ -237,13 +244,15 @@ single, self-documenting command with the correct flags baked in.
 The brief requires Kubernetes deployment via Helm. Services differ in how they
 scale and what they expose: the API serves request traffic and needs a Service;
 the Collector is a queue consumer that exposes no Service but must scale with
-load. Both must meet a hardened security posture.
+load; the Streamer is a queue producer that likewise exposes no Service, scales
+to drive load, and needs its source CSV mounted from a PersistentVolume. All
+three must meet a hardened security posture.
 
 ### Decision
 
-Package each service as its **own Helm chart** (`deploy/helm/gpu-telemetry-api`
-and `deploy/helm/gpu-telemetry-collector`) and deploy onto **minikube** for local
-end-to-end testing.
+Package each service as its **own Helm chart** (`deploy/helm/gpu-telemetry-api`,
+`deploy/helm/gpu-telemetry-collector`, and `deploy/helm/gpu-telemetry-streamer`)
+and deploy onto **minikube** for local end-to-end testing.
 
 ### Why Helm
 
@@ -257,11 +266,11 @@ end-to-end testing.
 - **Lifecycle management.** `helm upgrade --install --wait` gives atomic,
   idempotent rollouts (and easy rollback) instead of hand-applied `kubectl`
   files.
-- **Separate charts = independent scaling.** The Collector chart ships a
-  `HorizontalPodAutoscaler` (2–10 replicas, the brief's cap) and its own image,
-  so it scales on load **independently of the API** — which is the headline
-  Collector requirement. Splitting the charts (and the Dockerfiles) is what makes
-  that independence real.
+- **Separate charts = independent scaling.** The Collector and Streamer charts
+  each ship a `HorizontalPodAutoscaler` (the brief's 1–10 replica cap) and their
+  own image, so each scales on load **independently of the API and of each
+  other** — the headline elasticity requirement. Splitting the charts (and the
+  Dockerfiles) is what makes that independence real.
 
 ### Why minikube
 
@@ -283,7 +292,66 @@ end-to-end testing.
 - **Positive:** Each service deploys, scales, and is secured independently;
   values-driven config makes promotion across environments trivial; the security
   posture is genuinely enforced and testable locally.
-- **Trade-off:** Two charts to maintain instead of one, and Kafka/TimescaleDB are
-  expected to be provided as endpoints (via values) rather than sub-charts —
+- **Trade-off:** Three charts to maintain instead of one, and Kafka/TimescaleDB
+  are expected to be provided as endpoints (via values) rather than sub-charts —
   keeping the application charts focused on the application. The
-  `deploy/docker-compose.yaml` stack covers the batteries-included local case.
+  `deploy/docker-compose.yaml` stack covers the batteries-included local case
+  (Kafka + TimescaleDB + Streamer + Collector + API).
+
+---
+
+## 5. Telemetry Streamer: stateless replay, data on a PVC
+
+**Status:** Accepted
+
+### Context
+
+The Streamer replays the sample CSV onto the queue to simulate a live DCGM feed.
+The brief sets two shaping requirements: each CSV line is an independent
+datapoint, replayed in a loop to simulate a continuous stream; and **the time a
+datapoint is processed is its timestamp** (the original CSV timestamp column is
+ignored). The Streamer must also **scale up and down dynamically**, like the
+Collector. Two design questions follow: how does a fleet of Streamers scale
+without producing garbage, and how does the CSV reach each replica?
+
+### Decision
+
+**Scaling — stateless, coordination-free replay.** Each replica loads the whole
+dataset and loops over it independently, stamping every datapoint with the wall
+-clock time at publish. Messages are keyed by **GPU UUID** so each GPU's series
+hashes to one partition and stays ordered end-to-end. No sharding, no leader, no
+shared cursor.
+
+**Data — mounted from a PersistentVolume at runtime, not baked into the image.**
+The CSV lives on a PVC, loaded once via `make load-streamer-data` (a short-lived
+helper pod + `kubectl cp`); the Deployment mounts it read-only and an init
+container blocks startup until the file is present. Compose mirrors this with a
+read-only bind mount.
+
+### Why stamping at publish time makes scaling safe
+
+Because the timestamp is the publish time, two replicas emitting the *same* CSV
+row produce two datapoints at *different* times — distinct rows, not duplicates.
+So adding replicas simply multiplies the aggregate telemetry rate
+(`replicas / interval`) with no coordination, exactly mirroring how the Collector
+scales as competing consumers. The store's idempotency key
+`(uuid, metric_name, time)` still protects against true redelivery duplicates.
+
+### Why a PVC over the alternatives
+
+| Option | Verdict |
+|---|---|
+| **Embed the CSV in the binary (`go:embed`)** | Rejected: couples a ~1 MiB dataset to the image, so changing data means rebuilding/redeploying; the data is not independently versioned. (This was the first cut, then revised.) |
+| **ConfigMap** | Rejected: the sample CSV exceeds the **1 MiB ConfigMap limit**, and real datasets are larger still. |
+| **PersistentVolume (chosen)** | Decouples data lifecycle from the image: load once, mount read-only into every replica. On single-node minikube a `ReadWriteOnce` claim is shared by all replicas on the node; the init-container gate keeps pods out of `CrashLoop` until the data is loaded. |
+
+### Consequences
+
+- **Positive:** Data and code are versioned and provisioned independently; the
+  image stays small; scaling is friction-free (no per-replica data wiring).
+- **Positive:** The Streamer programs against `queue.Producer`, so the eventual
+  custom queue is a drop-in here too.
+- **Trade-off:** `ReadWriteOnce` relies on all replicas sharing minikube's single
+  node. On a multi-node cluster this becomes `ReadOnlyMany` (with a provisioner
+  that supports it) or a per-pod init container that fetches the data — a values
+  change, not a redesign.

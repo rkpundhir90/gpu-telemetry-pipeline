@@ -12,10 +12,11 @@ from Swagger at a later stage.
 | **Namespace** | `gpu-telemetry` |
 | **Service** | `gpu-telemetry-gpu-telemetry-api` (NodePort) |
 | **NodePort** | `30080` → container `8080` |
-| **Health** | `/healthz` |
+| **Health** | `/healthz` (liveness), `/readyz` (readiness — pings the DB) |
 | **Swagger UI** | `/swagger/index.html` |
 | **OpenAPI spec** | `/swagger/doc.json` |
 | **API base path** | `/api/v1` |
+| **Endpoints** | `GET /api/v1/gpus`, `GET /api/v1/gpus/{id}/telemetry` |
 
 ## From WSL / Linux (node IP is routable)
 
@@ -25,8 +26,16 @@ MIP=$(minikube ip)            # 192.168.49.2
 xdg-open  "http://$MIP:30080/swagger/index.html"   # or just open in a browser
 # Health / API:
 curl "http://$MIP:30080/healthz"
+curl "http://$MIP:30080/readyz"
 curl "http://$MIP:30080/api/v1/gpus"
+# Telemetry for a GPU (newest first; optional window + limit):
+curl "http://$MIP:30080/api/v1/gpus/<uuid>/telemetry?limit=20"
+curl "http://$MIP:30080/api/v1/gpus/<uuid>/telemetry?start_time=2025-07-18T20:42:34Z&end_time=2025-07-18T21:00:00Z"
 ```
+
+> Endpoints return data only once the Streamer + Collector have populated
+> TimescaleDB. `GET /api/v1/gpus` lists the GPUs seen so far; use one of those
+> UUIDs as `<uuid>` above.
 
 ## From the Windows host (browser → Swagger)
 
@@ -61,5 +70,7 @@ Both work because the same host/port serves the UI and the API.
 ## Verified
 
 `/swagger/index.html`, `/swagger/doc.json`, and `/healthz` all return `HTTP 200`
-via `http://192.168.49.2:30080`. Note the API handlers themselves are still
-stubs and return `501 Not Implemented` until implemented.
+via `http://192.168.49.2:30080`. The data endpoints (`/api/v1/gpus`,
+`/api/v1/gpus/{id}/telemetry`) are implemented and read from TimescaleDB — they
+return live data once the Streamer/Collector have populated the store, and `[]`
+before then. `/readyz` returns `503` if the datastore is unreachable.

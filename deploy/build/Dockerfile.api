@@ -5,7 +5,6 @@
 #   docker build -f deploy/build/Dockerfile.api -t gpu-telemetry-api:0.1.0 .
 # (or simply `make docker-build`).
 
-# ---- build stage ---------------------------------------------------------
 FROM golang:1.26-alpine AS build
 
 WORKDIR /src
@@ -21,7 +20,6 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -trimpath -ldflags="-s -w" -o /out/api ./cmd/api
 
-# ---- runtime stage -------------------------------------------------------
 # distroless static + nonroot: no shell, no package manager, runs as uid 65532.
 FROM gcr.io/distroless/static-debian12:nonroot
 

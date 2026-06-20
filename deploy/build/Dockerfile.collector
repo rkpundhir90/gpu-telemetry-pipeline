@@ -9,7 +9,6 @@
 #   docker build -f deploy/build/Dockerfile.collector -t gpu-telemetry-collector:0.1.0 .
 # (or simply `make docker-build-collector`).
 
-# ---- build stage ---------------------------------------------------------
 FROM golang:1.26-alpine AS build
 
 WORKDIR /src
@@ -28,7 +27,6 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -trimpath -ldflags="-s -w" -o /out/collector ./cmd/collector
 
-# ---- runtime stage -------------------------------------------------------
 # distroless static + nonroot: no shell, no package manager, runs as uid 65532.
 FROM gcr.io/distroless/static-debian12:nonroot
 

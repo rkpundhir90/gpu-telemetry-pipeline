@@ -1,5 +1,5 @@
 {{- define "app.name" -}}
-gpu-telemetry-api
+gpu-telemetry-streamer
 {{- end -}}
 
 {{- define "app.fullname" -}}
@@ -21,13 +21,4 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
 {{- define "app.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "app.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
-{{- end -}}
-
-{{/* Name of the Secret holding the Postgres DSN (created or pre-existing). */}}
-{{- define "app.dsnSecretName" -}}
-{{- if .Values.postgres.existingSecret -}}
-{{- .Values.postgres.existingSecret -}}
-{{- else -}}
-{{- printf "%s-dsn" (include "app.fullname" .) -}}
-{{- end -}}
 {{- end -}}

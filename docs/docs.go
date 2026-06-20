@@ -29,7 +29,10 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "type": "string"
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/gpu-telemetry-pipeline_internal_store.GPU"
+                            }
                         }
                     },
                     "500": {
@@ -43,7 +46,7 @@ const docTemplate = `{
         },
         "/api/v1/gpus/{id}/telemetry": {
             "get": {
-                "description": "Returns telemetry for a specific GPU ordered by time, with optional inclusive time-window filters.",
+                "description": "Returns telemetry for a specific GPU ordered by time (newest first), with optional inclusive time-window filters.",
                 "produces": [
                     "application/json"
                 ],
@@ -73,7 +76,7 @@ const docTemplate = `{
                     },
                     {
                         "type": "integer",
-                        "description": "Max rows to return",
+                        "description": "Max rows to return (default 1000, max 10000)",
                         "name": "limit",
                         "in": "query"
                     }
@@ -82,7 +85,10 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "type": "string"
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/gpu-telemetry-pipeline_internal_telemetry.Record"
+                            }
                         }
                     },
                     "400": {
@@ -108,7 +114,7 @@ const docTemplate = `{
                 "tags": [
                     "system"
                 ],
-                "summary": "Liveness/readiness probe",
+                "summary": "Liveness probe",
                 "responses": {
                     "200": {
                         "description": "OK",
@@ -121,9 +127,108 @@ const docTemplate = `{
                     }
                 }
             }
+        },
+        "/readyz": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "system"
+                ],
+                "summary": "Readiness probe (checks datastore connectivity)",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/internal_api.ErrorResponse"
+                        }
+                    }
+                }
+            }
         }
     },
     "definitions": {
+        "gpu-telemetry-pipeline_internal_store.GPU": {
+            "type": "object",
+            "properties": {
+                "hostname": {
+                    "type": "string"
+                },
+                "last_seen": {
+                    "type": "string"
+                },
+                "model_name": {
+                    "type": "string"
+                },
+                "uuid": {
+                    "type": "string"
+                }
+            }
+        },
+        "gpu-telemetry-pipeline_internal_telemetry.Record": {
+            "type": "object",
+            "properties": {
+                "container": {
+                    "description": "Container/Pod/Namespace are the Kubernetes attribution fields. They are\nfrequently empty in the source data, hence omitempty.",
+                    "type": "string"
+                },
+                "device": {
+                    "description": "Device is the Linux device name, e.g. \"nvidia0\".",
+                    "type": "string"
+                },
+                "gpu_id": {
+                    "description": "GPUID is the per-host ordinal GPU index (\"0\", \"1\", ...). It is only unique\nwithin a host; use UUID to identify a GPU globally.",
+                    "type": "string"
+                },
+                "hostname": {
+                    "description": "Hostname is the host that reported the metric.",
+                    "type": "string"
+                },
+                "labels": {
+                    "description": "Labels holds the parsed key/value pairs from the DCGM \"labels_raw\" column.\nOptional; preserved for richer querying without bloating the core schema.",
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                },
+                "metric_name": {
+                    "description": "MetricName is the DCGM field, e.g. \"DCGM_FI_DEV_GPU_UTIL\".",
+                    "type": "string"
+                },
+                "model_name": {
+                    "description": "ModelName is the GPU model, e.g. \"NVIDIA H100 80GB HBM3\".",
+                    "type": "string"
+                },
+                "namespace": {
+                    "type": "string"
+                },
+                "pod": {
+                    "type": "string"
+                },
+                "timestamp": {
+                    "description": "Timestamp is the processing/stream time of the datapoint (RFC3339 on the\nwire). It is the time axis the API orders and filters by.",
+                    "type": "string"
+                },
+                "uuid": {
+                    "description": "UUID is the globally-unique GPU identifier (GPU-xxxx...). This is the\npartition key on the queue and the primary lookup key in the API.",
+                    "type": "string"
+                },
+                "value": {
+                    "description": "Value is the numeric metric reading.",
+                    "type": "number"
+                }
+            }
+        },
         "internal_api.ErrorResponse": {
             "type": "object",
             "properties": {

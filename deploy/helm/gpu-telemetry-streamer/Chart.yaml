@@ -1,0 +1,6 @@
+apiVersion: v2
+name: gpu-telemetry-streamer
+description: Horizontally-scalable Telemetry Streamer that replays GPU telemetry from a CSV onto Kafka, stamping each datapoint with its processing time.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

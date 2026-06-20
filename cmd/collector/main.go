@@ -38,7 +38,6 @@ func main() {
 }
 
 func run(ctx context.Context, cfg config.Collector, log *slog.Logger) error {
-	// --- persistence -------------------------------------------------------
 	// Bound the initial connect so a misconfigured DSN fails fast instead of
 	// hanging the pod's startup.
 	connectCtx, cancelConnect := context.WithTimeout(ctx, 30*time.Second)
@@ -66,7 +65,6 @@ func run(ctx context.Context, cfg config.Collector, log *slog.Logger) error {
 		log.Info("schema ready (TimescaleDB hypertable)")
 	}
 
-	// --- queue -------------------------------------------------------------
 	consumer, err := kafkaqueue.New(kafkaqueue.Config{
 		Brokers: cfg.KafkaBrokers,
 		Topic:   cfg.KafkaTopic,
@@ -79,14 +77,12 @@ func run(ctx context.Context, cfg config.Collector, log *slog.Logger) error {
 	log.Info("joined consumer group",
 		"brokers", cfg.KafkaBrokers, "topic", cfg.KafkaTopic, "group", cfg.KafkaGroupID)
 
-	// --- collector ---------------------------------------------------------
 	coll := collector.New(consumer, st, collector.Config{
 		BatchSize:     cfg.BatchSize,
 		FlushInterval: cfg.FlushInterval,
 		FlushTimeout:  cfg.FlushTimeout,
 	}, log)
 
-	// --- health server (k8s probes) ---------------------------------------
 	healthSrv := startHealthServer(cfg.HealthAddr, st, coll.Stats(), log)
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

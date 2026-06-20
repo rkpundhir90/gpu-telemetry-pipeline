@@ -19,10 +19,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"gpu-telemetry-pipeline/internal/store"
 	"gpu-telemetry-pipeline/internal/telemetry"
 )
 
@@ -174,6 +176,97 @@ func (s *Store) Insert(ctx context.Context, records []telemetry.Record) error {
 		return fmt.Errorf("postgres: insert batch of %d: %w", len(records), firstErr)
 	}
 	return nil
+}
+
+const listGPUsSQL = `
+SELECT uuid,
+       COALESCE(MAX(model_name), '') AS model_name,
+       COALESCE(MAX(hostname), '')   AS hostname,
+       MAX(time)                     AS last_seen
+FROM ` + TableName + `
+GROUP BY uuid
+ORDER BY uuid`
+
+// ListGPUs returns one summary row per GPU. Grouping by uuid collapses a GPU's
+// many datapoints into a single entry; MAX(time) surfaces when it was last seen.
+func (s *Store) ListGPUs(ctx context.Context) ([]store.GPU, error) {
+	rows, err := s.pool.Query(ctx, listGPUsSQL)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list gpus: %w", err)
+	}
+	defer rows.Close()
+
+	var gpus []store.GPU
+	for rows.Next() {
+		var g store.GPU
+		if err := rows.Scan(&g.UUID, &g.ModelName, &g.Hostname, &g.LastSeen); err != nil {
+			return nil, fmt.Errorf("postgres: scan gpu: %w", err)
+		}
+		gpus = append(gpus, g)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: list gpus: %w", err)
+	}
+	return gpus, nil
+}
+
+const queryTelemetrySQL = `
+SELECT time, metric_name,
+       COALESCE(gpu_id, ''), COALESCE(device, ''), uuid,
+       COALESCE(model_name, ''), COALESCE(hostname, ''),
+       COALESCE(container, ''), COALESCE(pod, ''), COALESCE(namespace, ''),
+       COALESCE(value, 0), labels
+FROM ` + TableName + `
+WHERE uuid = $1
+  AND ($2::timestamptz IS NULL OR time >= $2)
+  AND ($3::timestamptz IS NULL OR time <= $3)
+ORDER BY time DESC
+LIMIT $4`
+
+// QueryTelemetry reads a GPU's series newest-first, served by the
+// (uuid, time DESC) index. A zero Start/End is passed as NULL so that side of
+// the window is unbounded.
+func (s *Store) QueryTelemetry(ctx context.Context, q store.TelemetryQuery) ([]telemetry.Record, error) {
+	rows, err := s.pool.Query(ctx, queryTelemetrySQL,
+		q.UUID, nullableTime(q.Start), nullableTime(q.End), q.Limit)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: query telemetry: %w", err)
+	}
+	defer rows.Close()
+
+	var records []telemetry.Record
+	for rows.Next() {
+		var (
+			r      telemetry.Record
+			labels []byte
+		)
+		if err := rows.Scan(
+			&r.Timestamp, &r.MetricName, &r.GPUID, &r.Device, &r.UUID,
+			&r.ModelName, &r.Hostname, &r.Container, &r.Pod, &r.Namespace,
+			&r.Value, &labels,
+		); err != nil {
+			return nil, fmt.Errorf("postgres: scan telemetry: %w", err)
+		}
+		if len(labels) > 0 {
+			if err := json.Unmarshal(labels, &r.Labels); err != nil {
+				return nil, fmt.Errorf("postgres: unmarshal labels for %s: %w", r.UUID, err)
+			}
+		}
+		records = append(records, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: query telemetry: %w", err)
+	}
+	return records, nil
+}
+
+// nullableTime maps the zero time to a SQL NULL so an unset window bound is
+// treated as unbounded.
+func nullableTime(t time.Time) any {
+	if t.IsZero() {
+		return nil
+	}
+	return t.UTC()
 }
 
 // Ping verifies the database is reachable.

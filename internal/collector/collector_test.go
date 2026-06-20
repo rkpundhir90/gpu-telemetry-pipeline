@@ -13,8 +13,6 @@ import (
 	"gpu-telemetry-pipeline/internal/telemetry"
 )
 
-// --- fakes ----------------------------------------------------------------
-
 // fakeConsumer serves a fixed set of messages then blocks until ctx is done,
 // mimicking a queue that has nothing more to deliver. It records committed
 // messages so tests can assert offset-advance behaviour.
@@ -87,8 +85,6 @@ func (s *fakeStore) insertedCount() int {
 	return len(s.inserted)
 }
 
-// --- helpers --------------------------------------------------------------
-
 func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
@@ -135,8 +131,6 @@ func runCollector(t *testing.T, c *Collector) func() {
 		}
 	}
 }
-
-// --- tests ----------------------------------------------------------------
 
 func TestPersistsAndCommitsAllMessages(t *testing.T) {
 	cons := newFakeConsumer(8)

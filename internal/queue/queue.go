@@ -56,3 +56,20 @@ type Consumer interface {
 	// surviving members pick up this member's partitions. Safe to call once.
 	Close() error
 }
+
+// Producer is the write side of the queue, used by the Streamer to publish
+// telemetry. It is the only queue surface the Streamer depends on, so swapping
+// Kafka for the custom queue later means adding one more implementation here.
+//
+// A Message's Key selects the destination partition: keying by GPU UUID keeps
+// each GPU's datapoints on one partition, so they stay ordered end-to-end.
+type Producer interface {
+	// Publish writes the given messages, returning only once the queue has
+	// durably accepted them (or with an error if it has not). A non-nil error
+	// means the caller should assume none were published and retry.
+	Publish(ctx context.Context, msgs ...Message) error
+
+	// Close flushes any buffered messages and releases resources. Safe to call
+	// once.
+	Close() error
+}

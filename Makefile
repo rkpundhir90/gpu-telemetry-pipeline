@@ -9,10 +9,7 @@ HELM_BIN := $(shell command -v helm 2> /dev/null)
 # Sets up the required infrastructure (Docker, Minikube, kubectl, and Helm)
 setup-infra: install-docker install-minikube install-kubectl install-helm verify
 
-# ==========================================
-# UBUNTU/DEBIAN TARGETS
-# ==========================================
-
+# Ubuntu/Debian targets
 install-docker:
 ifndef DOCKER_BIN
 	@echo "Updating apt package index..."
@@ -99,10 +96,7 @@ openapi:
 		--parseInternal \
 		--parseDependency
 
-# ==========================================
-# BUILD & DEPLOY (Docker image + Helm -> minikube)
-# ==========================================
-
+# Build & deploy (Docker image + Helm -> minikube)
 IMAGE     ?= gpu-telemetry-api
 TAG       ?= 0.1.0
 NAMESPACE ?= gpu-telemetry
@@ -114,13 +108,23 @@ COLLECTOR_IMAGE     ?= gpu-telemetry-collector
 COLLECTOR_RELEASE   ?= gpu-telemetry-collector
 COLLECTOR_CHART_DIR ?= deploy/helm/gpu-telemetry-collector
 
+# Streamer service: its own image and chart so it scales independently.
+STREAMER_IMAGE     ?= gpu-telemetry-streamer
+STREAMER_RELEASE   ?= gpu-telemetry-streamer
+STREAMER_CHART_DIR ?= deploy/helm/gpu-telemetry-streamer
+# Telemetry data loaded onto the streamer's PVC at runtime (not baked into the image).
+STREAMER_CSV       ?= project_docs/dcgm_metrics_20250718_134233.csv
+STREAMER_CSV_NAME  ?= dcgm_metrics.csv
+
 .PHONY: docker-build minikube-load namespace helm-lint helm-template deploy undeploy status expose service-url
 .PHONY: docker-build-collector minikube-load-collector deploy-collector undeploy-collector
+.PHONY: docker-build-streamer minikube-load-streamer deploy-streamer undeploy-streamer load-streamer-data
 
 # Dockerfiles live under deploy/build; the build context is the repo root (where
 # the Go module is), passed as the final ".".
 API_DOCKERFILE       ?= deploy/build/Dockerfile.api
 COLLECTOR_DOCKERFILE ?= deploy/build/Dockerfile.collector
+STREAMER_DOCKERFILE  ?= deploy/build/Dockerfile.streamer
 
 # Build the minimal, multi-stage (distroless, static) image.
 docker-build:
@@ -130,12 +134,17 @@ docker-build:
 minikube-load: docker-build
 	minikube image load $(IMAGE):$(TAG)
 
-# ---- collector image -----------------------------------------------------
 docker-build-collector:
 	DOCKER_BUILDKIT=1 docker build -f $(COLLECTOR_DOCKERFILE) -t $(COLLECTOR_IMAGE):$(TAG) .
 
 minikube-load-collector: docker-build-collector
 	minikube image load $(COLLECTOR_IMAGE):$(TAG)
+
+docker-build-streamer:
+	DOCKER_BUILDKIT=1 docker build -f $(STREAMER_DOCKERFILE) -t $(STREAMER_IMAGE):$(TAG) .
+
+minikube-load-streamer: docker-build-streamer
+	minikube image load $(STREAMER_IMAGE):$(TAG)
 
 # Step 1 of security: create + harden the dedicated namespace
 # (restricted Pod Security Admission).
@@ -186,14 +195,37 @@ deploy-collector: minikube-load-collector namespace
 undeploy-collector:
 	-helm uninstall $(COLLECTOR_RELEASE) --namespace $(NAMESPACE)
 
+# Provision the streamer's data PVC and copy the CSV onto it, so the Streamer
+# reads it from a mounted volume at runtime. Uses a short-lived helper pod
+# because the local file must be copied into the volume (`kubectl cp`).
+load-streamer-data: namespace
+	kubectl apply -f deploy/streamer-data-pvc.yaml
+	kubectl -n $(NAMESPACE) apply -f deploy/streamer-data-loader.yaml
+	kubectl -n $(NAMESPACE) wait --for=condition=ready pod/streamer-data-loader --timeout=120s
+	kubectl -n $(NAMESPACE) cp $(STREAMER_CSV) streamer-data-loader:/data/$(STREAMER_CSV_NAME)
+	kubectl -n $(NAMESPACE) delete pod streamer-data-loader --wait=false
+	@echo "✅ loaded $(STREAMER_CSV) -> PVC gpu-telemetry-streamer-data:/data/$(STREAMER_CSV_NAME)"
+
+# Deploy the streamer chart (expects the namespace to already exist; create it
+# with `make namespace`). Loads the CSV onto the PVC first. Point it at Kafka via
+# --set or values.
+deploy-streamer: minikube-load-streamer namespace load-streamer-data
+	helm lint $(STREAMER_CHART_DIR)
+	helm upgrade --install $(STREAMER_RELEASE) $(STREAMER_CHART_DIR) \
+		--namespace $(NAMESPACE) \
+		--create-namespace=false \
+		--wait --timeout 180s
+	kubectl -n $(NAMESPACE) get deploy,pod,hpa -l app.kubernetes.io/name=gpu-telemetry-streamer -o wide
+
+undeploy-streamer:
+	-helm uninstall $(STREAMER_RELEASE) --namespace $(NAMESPACE)
+
 # Remove the release and the dedicated namespace.
 undeploy:
 	-helm uninstall $(RELEASE) --namespace $(NAMESPACE)
 	-kubectl delete -f deploy/namespace.yaml
 
-# ==========================================
-# TEST & COVERAGE
-# ==========================================
+# Test & coverage
 .PHONY: test cover cover-html
 
 # Run all unit tests with the race detector.

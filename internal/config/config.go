@@ -8,11 +8,17 @@ import (
 // API holds the API gateway's settings.
 type API struct {
 	ListenAddr string
+
+	// PostgresDSN is the TimescaleDB connection string the API reads telemetry
+	// from (the same store the Collector writes to).
+	PostgresDSN string
 }
 
 func APIConfig() API {
 	return API{
 		ListenAddr: getenv("API_LISTEN_ADDR", ":8080"),
+		PostgresDSN: getenv("POSTGRES_DSN",
+			"postgres://telemetry:telemetry@localhost:5432/telemetry?sslmode=disable"),
 	}
 }
 
@@ -54,6 +60,43 @@ func CollectorConfig() Collector {
 		FlushTimeout:  getenvDuration("COLLECTOR_FLUSH_TIMEOUT", 15*time.Second),
 
 		HealthAddr: getenv("COLLECTOR_HEALTH_ADDR", ":8081"),
+	}
+}
+
+// Streamer holds the Telemetry Streamer's settings. Like the Collector, it is
+// sourced from the environment so the same binary runs unchanged across local
+// dev, Docker Compose, and Kubernetes.
+type Streamer struct {
+	// Kafka producer settings. Brokers is a comma-separated list. The topic is
+	// the same one the Collector consumes from.
+	KafkaBrokers []string
+	KafkaTopic   string
+
+	// CSVPath is the telemetry source file, read at runtime. In Kubernetes it
+	// points at a file mounted from a PersistentVolume; required (the Streamer
+	// has no built-in dataset).
+	CSVPath string
+
+	// Interval is the per-replica delay between datapoints; Loop replays the
+	// dataset endlessly to simulate a continuous stream.
+	Interval time.Duration
+	Loop     bool
+
+	// HealthAddr is where the liveness/readiness HTTP server listens (for k8s
+	// probes).
+	HealthAddr string
+}
+
+func StreamerConfig() Streamer {
+	return Streamer{
+		KafkaBrokers: splitAndTrim(getenv("KAFKA_BROKERS", "localhost:9092")),
+		KafkaTopic:   getenv("KAFKA_TOPIC", "gpu-telemetry"),
+
+		CSVPath:  getenv("STREAMER_CSV_PATH", ""),
+		Interval: getenvDuration("STREAMER_INTERVAL", 10*time.Millisecond),
+		Loop:     getenvBool("STREAMER_LOOP", true),
+
+		HealthAddr: getenv("STREAMER_HEALTH_ADDR", ":8082"),
 	}
 }
 

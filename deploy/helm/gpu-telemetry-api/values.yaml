@@ -1,8 +1,5 @@
-# ---------------------------------------------------------------------------
-# Image
 # Built locally and loaded into minikube (`minikube image load`), so we must
 # NOT try to pull it from a registry.
-# ---------------------------------------------------------------------------
 image:
   repository: gpu-telemetry-api
   tag: "0.1.0"
@@ -10,11 +7,18 @@ image:
 
 replicaCount: 2
 
-# ---------------------------------------------------------------------------
+# The telemetry store the API reads from (the same TimescaleDB the Collector
+# writes to). A Secret is created from `dsn` so it is not rendered in plaintext
+# into the Deployment manifest; set `existingSecret` (+ `secretKey`) to supply
+# your own and leave `dsn` empty.
+postgres:
+  dsn: "postgres://telemetry:telemetry@timescaledb:5432/telemetry?sslmode=disable"
+  existingSecret: ""
+  secretKey: "dsn"
+
 # Namespace + Pod Security Admission
 # The chart creates its own dedicated namespace and labels it with the
 # "restricted" Pod Security Standard so every pod is admission-checked.
-# ---------------------------------------------------------------------------
 # The dedicated namespace is created + hardened up-front by deploy/namespace.yaml
 # (Helm writes its release secret into the target namespace before applying
 # manifests, so the chart cannot reliably create the namespace it installs into).
@@ -24,10 +28,8 @@ namespace:
   # Pod Security Admission level enforced on the namespace.
   podSecurityStandard: restricted
 
-# ---------------------------------------------------------------------------
 # Workload security context (satisfies the "restricted" PSS)
 # 65532 is the uid/gid of the distroless `nonroot` user.
-# ---------------------------------------------------------------------------
 serviceAccount:
   create: true
   # The API does not talk to the Kubernetes API, so never mount a token.
@@ -57,9 +59,7 @@ resources:
     cpu: 250m
     memory: 128Mi
 
-# ---------------------------------------------------------------------------
 # Networking
-# ---------------------------------------------------------------------------
 service:
   # NodePort so the API is reachable on the minikube node IP (and from the
   # WSL/Windows host via a forwarder); see `make expose`.
@@ -73,6 +73,7 @@ listenAddr: ":8080"
 # NetworkPolicies (enforced by the Calico CNI):
 #  - default-deny all ingress + egress in the namespace
 #  - allow DNS egress to kube-dns
+#  - allow egress to Postgres (the API reads telemetry from the store)
 #  - allow ingress to the API on its port from within the namespace
 #  - allowExternal: also allow ingress to the API port from outside the
 #    namespace (NodePort/LoadBalancer traffic is SNAT'd from the node, so the
@@ -80,3 +81,4 @@ listenAddr: ":8080"
 networkPolicy:
   enabled: true
   allowExternal: true
+  postgresPort: 5432

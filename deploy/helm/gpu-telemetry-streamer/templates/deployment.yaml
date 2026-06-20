@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "app.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "app.labels" . | nindent 4 }}
+spec:
+  {{- /* When the HPA owns scaling, omit replicas so Helm upgrades don't fight it. */}}
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "app.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "app.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "app.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      initContainers:
+        # Block startup until the CSV has been loaded onto the volume, so the pod
+        # waits (Init state) instead of crash-looping if the data isn't there yet.
+        - name: wait-for-data
+          image: busybox:1.37
+          command:
+            - sh
+            - -c
+            - 'until [ -f "{{ .Values.csv.mountPath }}/{{ .Values.csv.fileName }}" ]; do echo "waiting for {{ .Values.csv.fileName }}"; sleep 2; done'
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: {{ .Values.csv.mountPath }}
+              readOnly: true
+      containers:
+        - name: streamer
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          env:
+            - name: KAFKA_BROKERS
+              value: {{ .Values.kafka.brokers | quote }}
+            - name: KAFKA_TOPIC
+              value: {{ .Values.kafka.topic | quote }}
+            - name: STREAMER_CSV_PATH
+              value: "{{ .Values.csv.mountPath }}/{{ .Values.csv.fileName }}"
+            - name: STREAMER_INTERVAL
+              value: {{ .Values.streamer.interval | quote }}
+            - name: STREAMER_LOOP
+              value: {{ .Values.streamer.loop | quote }}
+            - name: STREAMER_HEALTH_ADDR
+              value: ":{{ .Values.healthPort }}"
+          ports:
+            - name: health
+              containerPort: {{ .Values.healthPort }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            failureThreshold: 30
+            periodSeconds: 1
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: {{ .Values.csv.mountPath }}
+              readOnly: true
+            # readOnlyRootFilesystem is true, so give the process a writable /tmp.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Values.csv.claimName }}
+        - name: tmp
+          emptyDir: {}

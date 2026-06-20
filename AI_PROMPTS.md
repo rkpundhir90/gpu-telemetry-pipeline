@@ -13,7 +13,7 @@ and non-technical readers.
 | | |
 |---|---|
 | **AI tool used** | Claude Code (Anthropic) |
-| **What it did** | Scaffolded the project's initial structure, then containerised the API and deployed it to a security-hardened Kubernetes (minikube) namespace with Helm |
+| **What it did** | Scaffolded the project, containerised and deployed the API to a security-hardened Kubernetes (minikube) namespace with Helm, then built out the full data pipeline — Telemetry Collector, Telemetry Streamer, and the data-backed REST API |
 | **How it was used** | A series of guided prompts, with a human reviewing and correcting the output |
 | **Human oversight** | Every output was reviewed; several items needed manual intervention or course-correction (see below) |
 
@@ -78,6 +78,43 @@ implementation, the batching collector engine, a separate container image, a
 Helm chart with a HorizontalPodAutoscaler, a docker-compose dev stack, and unit
 tests with Makefile coverage targets.
 
+### 6. Documentation hygiene
+
+> "Remove the unnecessary comments from code and deployment files."
+
+The assistant found the codebase was deliberately, thoroughly commented, so
+rather than strip valuable explanations it asked how aggressive to be and — on
+the "noise only" answer — removed just decorative banner/divider lines, keeping
+all rationale and doc comments.
+
+### 7. The Telemetry Streamer
+
+> "Now focus on the Telemetry Streamer: reads telemetry from CSV and streams it
+> periodically over the custom message queue. Support the ability to dynamically
+> scale up/down the number of Streamers. The time at which a telemetry log is
+> processed is its timestamp. For now use Kafka."
+
+> "This CSV is supposed to be loaded onto a PVC in minikube and read by the Go
+> app at runtime — change the logic in the streamer accordingly."
+
+From these the assistant built the Streamer: a `queue.Producer` interface with a
+Kafka implementation, a DCGM-CSV parser, the replay engine (stamp each datapoint
+with its processing time, loop to simulate a continuous stream, key by GPU UUID),
+a separate image and Helm chart with an HPA, a PVC + data-loader for the CSV, and
+unit tests.
+
+### 8. Wiring the API to the store
+
+> "Update the API as well for these backend services/store changes."
+
+> "Update all the READMEs as per the structure and implementation done."
+
+The assistant added a `store.TelemetryReader` read interface (implemented on
+Postgres), wired it into the previously-stubbed API handlers (`/api/v1/gpus`,
+`/api/v1/gpus/{id}/telemetry`) with parameter validation and a `/readyz` probe,
+connected the API to TimescaleDB, regenerated the OpenAPI spec, and brought all
+the documentation in line.
+
 ## Where AI fell short
 
 AI accelerated the work, but its output was not accepted blindly. Items that
@@ -130,6 +167,25 @@ required manual intervention or human course-correction:
 13. **A toolchain/environment workaround.** The Go toolchain could not lock files
     over the `\\wsl.localhost` share from Windows, so builds and tests were run
     inside a `golang` container bind-mounted to the native Linux path.
+
+**During the Streamer and API build**
+
+14. **A data-delivery course-correction.** The assistant's first Streamer baked
+    the CSV into the binary (`go:embed`). The human redirected it to load the CSV
+    from a PersistentVolume at runtime, so the dataset is versioned and
+    provisioned independently of the image. The assistant reworked the loader,
+    added the PVC + data-loader manifests, and switched Compose to a bind mount.
+15. **Over-eager comment removal, avoided by asking.** Asked to "remove
+    unnecessary comments," the assistant recognised the comments were valuable and
+    asked for the intended aggressiveness rather than stripping documentation
+    wholesale.
+16. **A second OpenAPI correction.** `swag` could not resolve `telemetry.Record`
+    in a response annotation until the type was imported into the handler file;
+    the fix doubled as a real improvement (empty results now serialise as `[]`,
+    not `null`).
+17. **Line-ending consistency.** Rewriting existing files flipped them from the
+    repo's CRLF to LF; the assistant converted them back so each package stayed
+    internally consistent.
 
 These corrections are the reason every AI-generated output in this project was
 reviewed before being kept.

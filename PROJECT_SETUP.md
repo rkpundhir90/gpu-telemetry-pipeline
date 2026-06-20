@@ -3,7 +3,8 @@
 These are the steps used to bootstrap the project from scratch. They cover
 initialising the Go module, adding the web framework and API documentation, and
 creating the first routes so the service can be deployed to minikube for an
-early end-to-end check.
+early end-to-end check — then standing up the full data pipeline (Streamer →
+Kafka → Collector → TimescaleDB → API).
 
 > For the full build, test, and deployment workflow, see the [README](README.md).
 
@@ -60,6 +61,38 @@ early end-to-end check.
 - Expose the NodePort service to the host using minikube's native tunnel
   (no `kubectl port-forward`): `make service-url`, then reach it from the
   Windows host at `http://localhost:<port>`.
+
+## 10. Build the data pipeline (Streamer + Collector)
+
+- Define the shared on-the-wire `telemetry.Record`, a technology-agnostic
+  `queue` package (`Consumer` for the Collector, `Producer` for the Streamer)
+  with a Kafka implementation, and a `store` package (`TelemetryStore` write +
+  `TelemetryReader` read) with a TimescaleDB implementation.
+- **Collector** ([`internal/collector`](internal/collector/)): consume → batch →
+  persist → commit, with at-least-once delivery and idempotent inserts. Its own
+  image ([`Dockerfile.collector`](deploy/build/Dockerfile.collector)) and Helm
+  chart with an HPA so it scales independently.
+- **Streamer** ([`internal/streamer`](internal/streamer/)): replay the CSV onto
+  the queue, stamping each datapoint with its processing time, looping to
+  simulate a continuous stream. Its own image
+  ([`Dockerfile.streamer`](deploy/build/Dockerfile.streamer)) and Helm chart with
+  an HPA. The CSV is mounted at runtime from a PersistentVolume.
+
+## 11. Wire the API to the store
+
+- Implement the API handlers against `store.TelemetryReader`
+  (`GET /api/v1/gpus`, `GET /api/v1/gpus/{id}/telemetry`), add a `/readyz`
+  datastore-readiness probe, and connect the API to TimescaleDB via
+  `POSTGRES_DSN`. Regenerate the OpenAPI spec: `make openapi`.
+
+## 12. Run the whole pipeline
+
+- **Local (Compose):** `docker compose -f deploy/docker-compose.yaml up --build`
+  brings up Kafka + TimescaleDB + Streamer + Collector + API; query it at
+  `http://localhost:8080/api/v1/gpus`. Scale with
+  `--scale streamer=3 --scale collector=3`.
+- **minikube:** load the Streamer's data PVC (`make load-streamer-data`), then
+  `make deploy`, `make deploy-collector`, and `make deploy-streamer`.
 
 > For the full command reference and the security model, see the
 > [README](README.md).
