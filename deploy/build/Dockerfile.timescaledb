@@ -1,18 +1,5 @@
-# Dockerfile: extend Bitnami PostgreSQL with TimescaleDB package
-FROM bitnami/postgresql:15
+# Dockerfile: use official TimescaleDB image for Postgres 15
+FROM timescale/timescaledb:pg15
 
-# switch to root to install packages
-USER root
-ENV DEBIAN_FRONTEND=noninteractive
-
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends \
-     curl gnupg2 ca-certificates lsb-release apt-transport-https \
-  && curl -s https://packagecloud.io/install/repositories/timescale/timescaledb/script.deb.sh | bash \
-  && apt-get update \
-  && apt-get install -y --no-install-recommends timescaledb-postgresql-15 \
-  && apt-get clean \
-  && rm -rf /var/lib/apt/lists/*
-
-# revert to Bitnami non-root user
-USER 1001
+# Official TimescaleDB image already includes the extension and runs as a non-root user.
+# No additional packages required.
