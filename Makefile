@@ -310,3 +310,19 @@ deploy-timescaledb: namespace helm-add-repo-bitnami
 		-f $(TIMESCALE_VALUES) \
 		--wait --timeout 180s
 	kubectl -n $(NAMESPACE) get deploy,statefulset,pod,svc -o wide
+
+# Final override: allow non-standard images (enable for dev)
+.PHONY: deploy-timescaledb
+deploy-timescaledb: namespace helm-add-repo-bitnami
+	helm upgrade --install $(TIMESCALE_RELEASE) $(TIMESCALE_CHART) \
+		--namespace $(NAMESPACE) \
+		--set image.repository=$(TIMESCALE_IMAGE_REPO) \
+		--set image.tag=$(TIMESCALE_IMAGE_TAG) \
+		--set auth.username=telemetry \
+		--set auth.password=telemetry \
+		--set auth.database=telemetry \
+		--set postgresqlSharedPreloadLibraries='timescaledb' \
+		--set global.security.allowInsecureImages=true \
+		-f $(TIMESCALE_VALUES) \
+		--wait --timeout 180s
+	kubectl -n $(NAMESPACE) get deploy,statefulset,pod,svc -o wide
