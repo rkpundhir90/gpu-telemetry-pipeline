@@ -160,13 +160,15 @@ helm-lint:
 helm-template:
 	helm template $(RELEASE) $(CHART_DIR) --namespace $(NAMESPACE)
 
-# Full deploy: build image -> load into minikube -> harden namespace -> helm release.
-deploy: minikube-load namespace helm-lint
-	helm upgrade --install $(RELEASE) $(CHART_DIR) \
-		--namespace $(NAMESPACE) \
-		--create-namespace=false \
-		--wait --timeout 180s
-	kubectl -n $(NAMESPACE) get deploy,pod,svc -o wide
+
+# Full deploy: start minikube, DB, Kafka, images, charts, data load, then API
+deploy: start-minikube minikube-load namespace deploy-timescaledb deploy-kafka deploy-collector deploy-streamer
+@echo "Starting full deploy sequence..."
+@echo "Building API image and loading into minikube, creating namespace, and deploying TimescaleDB and Kafka."
+helm lint $(CHART_DIR)
+helm upgrade --install $(RELEASE) $(CHART_DIR) --namespace $(NAMESPACE) --create-namespace=false --wait --timeout 180s
+kubectl -n $(NAMESPACE) get deploy,pod,svc -o wide
+@echo "Deployment complete. Run 'make service-url' or visit the API Swagger to test."
 
 # Show what is running in the namespace, including the security posture.
 status:
@@ -260,7 +262,4 @@ TIMESCALE_VALUES     ?= deploy/helm/timescaledb/values.yaml
 
 .PHONY: deploy-timescaledb
 
-deploy-timescaledb:
-./deploy/helm/timescaledb/install.sh
-
-
+deploy-timescaledb: ./deploy/helm/timescaledb/install.sh

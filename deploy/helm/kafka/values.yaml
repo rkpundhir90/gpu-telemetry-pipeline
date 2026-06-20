@@ -1,0 +1,16 @@
+# Minimal values for bitnami/kafka for local dev
+replicaCount: 1
+zookeeper:
+  enabled: true
+  replicaCount: 1
+auth:
+  enabled: false
+persistence:
+  enabled: false
+resources:
+  requests:
+    memory: "256Mi"
+    cpu: "100m"
+  limits:
+    memory: "512Mi"
+    cpu: "500m"
