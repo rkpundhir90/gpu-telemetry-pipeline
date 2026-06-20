@@ -252,31 +252,15 @@ cover-html: cover
 	go tool cover -html=coverage.out -o coverage.html
 	@echo "wrote coverage.html"
 
-# TimescaleDB (Helm deploy using upstream TimescaleDB image)
+# TimescaleDB (Helm deploy script)
 TIMESCALE_IMAGE_REPO ?= timescale/timescaledb
 TIMESCALE_IMAGE_TAG  ?= latest-pg15
 TIMESCALE_RELEASE    ?= timescaledb
-TIMESCALE_CHART      ?= bitnami/postgresql
 TIMESCALE_VALUES     ?= deploy/helm/timescaledb/values.yaml
 
-.PHONY: helm-add-repo-bitnami deploy-timescaledb
+.PHONY: deploy-timescaledb
 
-helm-add-repo-bitnami:
-helm repo add bitnami https://charts.bitnami.com/bitnami || true
-helm repo update
+deploy-timescaledb:
+./deploy/helm/timescaledb/install.sh
 
-# Deploy TimescaleDB using upstream image (no local Docker build). For dev only.
-deploy-timescaledb: namespace helm-add-repo-bitnami
-helm upgrade --install $(TIMESCALE_RELEASE) $(TIMESCALE_CHART) \
---namespace $(NAMESPACE) \
---set image.repository=$(TIMESCALE_IMAGE_REPO) \
---set image.tag=$(TIMESCALE_IMAGE_TAG) \
---set auth.username=telemetry \
---set auth.password=telemetry \
---set auth.database=telemetry \
---set postgresqlSharedPreloadLibraries='timescaledb' \
---set global.security.allowInsecureImages=true \
--f $(TIMESCALE_VALUES) \
---wait --timeout 180s
-kubectl -n $(NAMESPACE) get deploy,statefulset,pod,svc -o wide
 
