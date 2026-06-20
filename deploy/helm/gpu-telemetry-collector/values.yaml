@@ -7,7 +7,7 @@ image:
 
 # Baseline replicas. When autoscaling is enabled the HPA owns the replica count
 # and this is only the starting point.
-replicaCount: 2
+replicaCount: 1
 
 # Horizontal scaling (the headline requirement for the collector)
 # Collectors are competing consumers in one Kafka group, so adding replicas
@@ -17,7 +17,7 @@ replicaCount: 2
 # Requires metrics-server in the cluster for CPU-based autoscaling.
 autoscaling:
   enabled: true
-  minReplicas: 2
+  minReplicas: 1
   maxReplicas: 10
   targetCPUUtilizationPercentage: 70
   # targetMemoryUtilizationPercentage: 80   # optional

@@ -5,7 +5,7 @@ image:
   tag: "0.1.0"
   pullPolicy: IfNotPresent
 
-replicaCount: 2
+replicaCount: 1
 
 # The telemetry store the API reads from (the same TimescaleDB the Collector
 # writes to). A Secret is created from `dsn` so it is not rendered in plaintext

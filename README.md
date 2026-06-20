@@ -144,7 +144,7 @@ partitions across the live members, rebalancing automatically as replicas are
 added or removed. To scale:
 
 - **Kubernetes:** the [collector Helm chart](deploy/helm/gpu-telemetry-collector/)
-  ships a `HorizontalPodAutoscaler` (default 2–10 replicas on CPU). Or scale
+  ships a `HorizontalPodAutoscaler` (default 1–10 replicas on CPU). Or scale
   manually: `kubectl -n gpu-telemetry scale deploy/<release>-gpu-telemetry-collector --replicas=N`.
 - **Compose:** `docker compose -f deploy/docker-compose.yaml up --scale collector=3`.
 
