@@ -119,6 +119,7 @@ STREAMER_CSV_NAME  ?= dcgm_metrics.csv
 .PHONY: docker-build minikube-load namespace helm-lint helm-template deploy undeploy status expose service-url
 .PHONY: docker-build-collector minikube-load-collector deploy-collector undeploy-collector
 .PHONY: docker-build-streamer minikube-load-streamer deploy-streamer undeploy-streamer load-streamer-data
+.PHONY: deploy-all undeploy-all
 
 # Dockerfiles live under deploy/build; the build context is the repo root (where
 # the Go module is), passed as the final ".".
@@ -220,10 +221,19 @@ deploy-streamer: minikube-load-streamer namespace load-streamer-data
 undeploy-streamer:
 	-helm uninstall $(STREAMER_RELEASE) --namespace $(NAMESPACE)
 
-# Remove the release and the dedicated namespace.
+# One-stop deploy of the whole pipeline: API + Collector + Streamer. Assumes a
+# running minikube (`make start-minikube`) and reachable Kafka/TimescaleDB.
+deploy-all: deploy deploy-collector deploy-streamer
+	@echo "✅ deployed API + Collector + Streamer to namespace $(NAMESPACE)"
+
+# Remove the API release and the dedicated namespace.
 undeploy:
 	-helm uninstall $(RELEASE) --namespace $(NAMESPACE)
 	-kubectl delete -f deploy/namespace.yaml
+
+# Tear down the whole pipeline: uninstall all releases, then delete the namespace.
+undeploy-all: undeploy-streamer undeploy-collector undeploy
+	@echo "✅ removed API + Collector + Streamer from namespace $(NAMESPACE)"
 
 # Test & coverage
 .PHONY: test cover cover-html
