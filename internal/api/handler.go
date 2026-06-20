@@ -10,29 +10,25 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"gpu-telemetry-pipeline/internal/api/service"
 	"gpu-telemetry-pipeline/internal/store"
 	"gpu-telemetry-pipeline/internal/telemetry"
 )
 
-const (
-	// defaultQueryLimit caps an unbounded telemetry query; maxQueryLimit is the
-	// ceiling a caller can request, so one request can't pull the whole series.
-	defaultQueryLimit = 1000
-	maxQueryLimit     = 10000
-)
-
-// Handlers serve the REST API, backed by the telemetry store's read side.
+// Handlers are the HTTP presentation layer: they decode requests, delegate to
+// the service (business layer), and map results/errors to HTTP responses. They
+// hold no business logic and never touch the store directly.
 type Handlers struct {
-	store store.TelemetryReader
-	log   *slog.Logger
+	svc *service.TelemetryService
+	log *slog.Logger
 }
 
-// NewHandlers wires the handlers to a telemetry reader.
-func NewHandlers(reader store.TelemetryReader, log *slog.Logger) *Handlers {
+// NewHandlers wires the handlers to the telemetry service.
+func NewHandlers(svc *service.TelemetryService, log *slog.Logger) *Handlers {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Handlers{store: reader, log: log}
+	return &Handlers{svc: svc, log: log}
 }
 
 // ErrorResponse is the JSON body returned for 4xx/5xx responses.
@@ -50,7 +46,7 @@ type ErrorResponse struct {
 //	@Failure		500	{object}	api.ErrorResponse
 //	@Router			/api/v1/gpus [get]
 func (h *Handlers) ListGPUs(c *gin.Context) {
-	gpus, err := h.store.ListGPUs(c.Request.Context())
+	gpus, err := h.svc.ListGPUs(c.Request.Context())
 	if err != nil {
 		h.log.Error("list gpus failed", "error", err)
 		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "failed to list gpus"})
@@ -77,12 +73,6 @@ func (h *Handlers) ListGPUs(c *gin.Context) {
 //	@Failure		500			{object}	api.ErrorResponse
 //	@Router			/api/v1/gpus/{id}/telemetry [get]
 func (h *Handlers) QueryTelemetry(c *gin.Context) {
-	id := c.Param("id")
-	if id == "" {
-		c.JSON(http.StatusBadRequest, ErrorResponse{Error: "gpu id is required"})
-		return
-	}
-
 	start, err := parseTime(c.Query("start_time"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, ErrorResponse{Error: "start_time must be RFC3339"})
@@ -99,14 +89,18 @@ func (h *Handlers) QueryTelemetry(c *gin.Context) {
 		return
 	}
 
-	records, err := h.store.QueryTelemetry(c.Request.Context(), store.TelemetryQuery{
-		UUID:  id,
+	records, err := h.svc.QueryTelemetry(c.Request.Context(), service.Query{
+		GPUID: c.Param("id"),
 		Start: start,
 		End:   end,
 		Limit: limit,
 	})
 	if err != nil {
-		h.log.Error("query telemetry failed", "error", err, "uuid", id)
+		if errors.Is(err, service.ErrInvalidArgument) {
+			c.JSON(http.StatusBadRequest, ErrorResponse{Error: err.Error()})
+			return
+		}
+		h.log.Error("query telemetry failed", "error", err, "uuid", c.Param("id"))
 		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "failed to query telemetry"})
 		return
 	}
@@ -138,7 +132,7 @@ func (h *Handlers) Health(c *gin.Context) {
 func (h *Handlers) Ready(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
 	defer cancel()
-	if err := h.store.Ping(ctx); err != nil {
+	if err := h.svc.CheckReadiness(ctx); err != nil {
 		c.JSON(http.StatusServiceUnavailable, ErrorResponse{Error: "datastore unavailable"})
 		return
 	}
@@ -154,18 +148,15 @@ func parseTime(s string) (time.Time, error) {
 	return time.Parse(time.RFC3339, s)
 }
 
-// parseLimit parses an optional positive row limit, applying the default when
-// absent and clamping to the maximum.
+// parseLimit parses an optional row limit. Absent yields 0 (the service applies
+// its default); a present value must be a positive integer.
 func parseLimit(s string) (int, error) {
 	if s == "" {
-		return defaultQueryLimit, nil
+		return 0, nil
 	}
 	n, err := strconv.Atoi(s)
 	if err != nil || n <= 0 {
 		return 0, errors.New("invalid limit")
-	}
-	if n > maxQueryLimit {
-		n = maxQueryLimit
 	}
 	return n, nil
 }

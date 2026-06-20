@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"gpu-telemetry-pipeline/internal/api/service"
 	"gpu-telemetry-pipeline/internal/store"
 	"gpu-telemetry-pipeline/internal/telemetry"
 )
@@ -36,7 +37,7 @@ func (f *fakeReader) Ping(context.Context) error { return f.pingErr }
 func quietLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 func newTestServer(r *fakeReader) http.Handler {
-	return NewRouter(NewHandlers(r, quietLogger()), quietLogger())
+	return NewRouter(NewHandlers(service.New(r), quietLogger()), quietLogger())
 }
 
 func do(t *testing.T, h http.Handler, method, target string) *httptest.ResponseRecorder {
@@ -106,8 +107,8 @@ func TestQueryTelemetryDefaultsLimitAndUnboundedWindow(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if r.lastQ.Limit != defaultQueryLimit {
-		t.Errorf("limit = %d, want default %d", r.lastQ.Limit, defaultQueryLimit)
+	if r.lastQ.Limit != service.DefaultQueryLimit {
+		t.Errorf("limit = %d, want default %d", r.lastQ.Limit, service.DefaultQueryLimit)
 	}
 	if !r.lastQ.Start.IsZero() || !r.lastQ.End.IsZero() {
 		t.Errorf("expected unbounded window, got %+v", r.lastQ)
@@ -120,8 +121,8 @@ func TestQueryTelemetryClampsLimit(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if r.lastQ.Limit != maxQueryLimit {
-		t.Errorf("limit = %d, want clamped %d", r.lastQ.Limit, maxQueryLimit)
+	if r.lastQ.Limit != service.MaxQueryLimit {
+		t.Errorf("limit = %d, want clamped %d", r.lastQ.Limit, service.MaxQueryLimit)
 	}
 }
 
@@ -138,6 +139,16 @@ func TestQueryTelemetryRejectsBadParams(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("%s: status = %d, want 400", target, rec.Code)
 		}
+	}
+}
+
+func TestQueryTelemetryServiceValidationIs400(t *testing.T) {
+	// end_time before start_time is rejected by the service; the handler maps the
+	// service's ErrInvalidArgument to 400.
+	rec := do(t, newTestServer(&fakeReader{}), http.MethodGet,
+		"/api/v1/gpus/GPU-a/telemetry?start_time=2025-07-18T21:00:00Z&end_time=2025-07-18T20:00:00Z")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
 	}
 }
 

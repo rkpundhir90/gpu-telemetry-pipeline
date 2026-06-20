@@ -15,6 +15,7 @@ import (
 	ginswagger "github.com/swaggo/gin-swagger"
 
 	"gpu-telemetry-pipeline/internal/api"
+	"gpu-telemetry-pipeline/internal/api/service"
 	"gpu-telemetry-pipeline/internal/config"
 	"gpu-telemetry-pipeline/internal/store/postgres"
 )
@@ -52,7 +53,8 @@ func run(ctx context.Context, cfg config.API, log *slog.Logger) error {
 	}()
 	log.Info("connected to telemetry store")
 
-	handlers := api.NewHandlers(st, log)
+	svc := service.New(st)
+	handlers := api.NewHandlers(svc, log)
 	router := api.NewRouter(handlers, log)
 
 	if _, err := os.Stat(openAPISpecPath); err == nil {

@@ -46,8 +46,9 @@ cmd/api/main.go       API gateway entry point (graceful shutdown, slog logging)
 cmd/collector/main.go Telemetry Collector entry point (health server, shutdown)
 cmd/streamer/main.go  Telemetry Streamer entry point (health server, shutdown)
 internal/api/         REST API layer (Gin)
-  handler.go            request handlers + OpenAPI annotations
+  handler.go            request handlers + OpenAPI annotations (presentation)
   router.go             routes, structured logging, Swagger UI route
+  service/              business layer between handlers and the store (API-only)
 internal/telemetry/   shared on-the-wire telemetry Record (producer <-> consumer)
 internal/queue/       queue.Consumer / queue.Producer abstractions (technology-agnostic)
   kafka/                Kafka implementation (segmentio/kafka-go: groups + producer)
@@ -285,8 +286,13 @@ present, so you can also load it independently with `make load-streamer-data`.
 ## REST API
 
 The API ([`internal/api`](internal/api/), entrypoint [`cmd/api`](cmd/api/main.go))
-reads telemetry from the same TimescaleDB the Collector writes to, via the
-store's read side (`store.TelemetryReader`). Base path `/api/v1`:
+reads telemetry from the same TimescaleDB the Collector writes to. It is layered
+**handlers → service → store**: the handlers
+([`handler.go`](internal/api/handler.go)) decode HTTP and map errors to status
+codes; a [`service`](internal/api/service/) layer (bundled with the API only)
+holds the business logic — input validation, query-limit defaulting/clamping,
+and orchestration; the store's read side (`store.TelemetryReader`) does data
+access. Base path `/api/v1`:
 
 | Method & path | Description |
 |---|---|
