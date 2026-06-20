@@ -1,0 +1,13 @@
+{{- if .Values.namespace.create }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Release.Namespace }}
+  labels:
+    {{- include "app.labels" . | nindent 4 }}
+    # Pod Security Admission: enforce/audit/warn at the configured level.
+    pod-security.kubernetes.io/enforce: {{ .Values.namespace.podSecurityStandard }}
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: {{ .Values.namespace.podSecurityStandard }}
+    pod-security.kubernetes.io/warn: {{ .Values.namespace.podSecurityStandard }}
+{{- end }}

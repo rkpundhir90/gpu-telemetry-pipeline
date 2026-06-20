@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -13,16 +14,16 @@ import (
 	swaggerfiles "github.com/swaggo/files"
 	ginswagger "github.com/swaggo/gin-swagger"
 
-	"github.com/rkpundhir90/gpu-telemetry-pipeline/internal/api"
-	"github.com/rkpundhir90/gpu-telemetry-pipeline/internal/config"
+	"gpu-telemetry-pipeline/internal/api"
+	"gpu-telemetry-pipeline/internal/config"
 )
 
 const openAPISpecPath = "api/openapi/swagger.json"
 
 func main() {
-	log := observability.NewLogger("api")
-    cfg := config.APIConfig()
-	handlers := api.NewHandlers(repo)
+	log := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", "api")
+	cfg := config.APIConfig()
+	handlers := api.NewHandlers()
 	router := api.NewRouter(handlers, log)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

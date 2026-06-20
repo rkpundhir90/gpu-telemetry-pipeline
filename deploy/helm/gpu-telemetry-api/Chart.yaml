@@ -1,0 +1,6 @@
+apiVersion: v2
+name: gpu-telemetry-api
+description: Hardened deployment of the GPU Telemetry Pipeline REST API into a dedicated, security-scoped namespace.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

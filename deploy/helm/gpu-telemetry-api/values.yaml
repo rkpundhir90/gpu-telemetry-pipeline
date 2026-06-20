@@ -1,0 +1,82 @@
+# ---------------------------------------------------------------------------
+# Image
+# Built locally and loaded into minikube (`minikube image load`), so we must
+# NOT try to pull it from a registry.
+# ---------------------------------------------------------------------------
+image:
+  repository: gpu-telemetry-api
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+# ---------------------------------------------------------------------------
+# Namespace + Pod Security Admission
+# The chart creates its own dedicated namespace and labels it with the
+# "restricted" Pod Security Standard so every pod is admission-checked.
+# ---------------------------------------------------------------------------
+# The dedicated namespace is created + hardened up-front by deploy/namespace.yaml
+# (Helm writes its release secret into the target namespace before applying
+# manifests, so the chart cannot reliably create the namespace it installs into).
+# Set create=true only if installing the chart into a *different* namespace.
+namespace:
+  create: false
+  # Pod Security Admission level enforced on the namespace.
+  podSecurityStandard: restricted
+
+# ---------------------------------------------------------------------------
+# Workload security context (satisfies the "restricted" PSS)
+# 65532 is the uid/gid of the distroless `nonroot` user.
+# ---------------------------------------------------------------------------
+serviceAccount:
+  create: true
+  # The API does not talk to the Kubernetes API, so never mount a token.
+  automountServiceAccountToken: false
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  capabilities:
+    drop:
+      - ALL
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 250m
+    memory: 128Mi
+
+# ---------------------------------------------------------------------------
+# Networking
+# ---------------------------------------------------------------------------
+service:
+  # NodePort so the API is reachable on the minikube node IP (and from the
+  # WSL/Windows host via a forwarder); see `make expose`.
+  type: NodePort
+  port: 8080
+  nodePort: 30080
+
+containerPort: 8080
+listenAddr: ":8080"
+
+# NetworkPolicies (enforced by the Calico CNI):
+#  - default-deny all ingress + egress in the namespace
+#  - allow DNS egress to kube-dns
+#  - allow ingress to the API on its port from within the namespace
+#  - allowExternal: also allow ingress to the API port from outside the
+#    namespace (NodePort/LoadBalancer traffic is SNAT'd from the node, so the
+#    in-namespace rule alone would not match it).
+networkPolicy:
+  enabled: true
+  allowExternal: true

@@ -1,0 +1,14 @@
+{{ include "app.name" . }} deployed to namespace "{{ .Release.Namespace }}".
+
+Pod Security:   restricted (Pod Security Admission)
+ServiceAccount: {{ include "app.serviceAccountName" . }} (token auto-mount disabled)
+NetworkPolicy:  {{ if .Values.networkPolicy.enabled }}enabled (default-deny + DNS + in-namespace HTTP{{ if .Values.networkPolicy.allowExternal }} + external{{ end }}){{ else }}disabled{{ end }}
+Service:        {{ .Values.service.type }}{{ if eq .Values.service.type "NodePort" }} (nodePort {{ .Values.service.nodePort }}){{ end }}
+
+Reach the API from WSL (node IP is routable):
+  curl http://$(minikube ip):{{ .Values.service.nodePort }}/healthz
+
+Reach the API from the Windows host (native minikube tunnel on 127.0.0.1,
+forwarded to Windows localhost) -- keep the process running:
+  make service-url      # prints http://127.0.0.1:<port>
+  # then from Windows:  curl http://localhost:<port>/healthz

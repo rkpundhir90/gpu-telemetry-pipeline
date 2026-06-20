@@ -13,9 +13,9 @@ and non-technical readers.
 | | |
 |---|---|
 | **AI tool used** | Claude Code (Anthropic) |
-| **What it did** | Scaffolded the project's initial structure and layout |
+| **What it did** | Scaffolded the project's initial structure, then containerised the API and deployed it to a security-hardened Kubernetes (minikube) namespace with Helm |
 | **How it was used** | A series of guided prompts, with a human reviewing and correcting the output |
-| **Human oversight** | Every output was reviewed; three items needed manual intervention (see below) |
+| **Human oversight** | Every output was reviewed; several items needed manual intervention or course-correction (see below) |
 
 The initial structure of this project was scaffolded with **Claude Code**,
 Anthropic's AI coding assistant. AI was used to bootstrap the project, wire up
@@ -45,16 +45,54 @@ The prompts below are grouped by the stage of work they supported.
 > deployment steps onto the minikube; bring up the minikube cluster if it
 > doesn't exist."
 
+### 4. Containerisation, deployment, and exposure
+
+> "Make a Docker image for this REST API and deploy to minikube."
+
+> "Package this API to a Docker image and deploy it to the minikube cluster with
+> Helm charts. First set up the security within a dedicated minikube namespace."
+
+> "Run the deploy through a `make` command and update that in the Makefile."
+
+> "Expose this service outside of WSL or minikube as well, without a `kubectl`
+> port forwarder command using nodeport services."
+
+> "Update the README, PROJECT_SETUP, and AI usage documents."
+
 ## Where AI fell short
 
-AI accelerated the early scaffolding, but its output was not accepted blindly.
-As recorded in the project [README](../README.md), three items required manual
-intervention:
+AI accelerated the work, but its output was not accepted blindly. Items that
+required manual intervention or human course-correction:
+
+**During early scaffolding**
 
 1. **A real bug** — an "offset-0" defect that was caught by the generated tests.
 2. **An OpenAPI correction** — the `swag init` command had to be corrected.
 3. **A design change** — how the CSV telemetry data is delivered was redesigned
    by hand.
+
+**During containerisation and deployment**
+
+4. **The code did not compile.** Before an image could be built, the assistant
+   had to find and fix several half-finished pieces of code (a missing logger,
+   an undefined variable, an inconsistent module path, and missing imports).
+5. **The cluster did not actually exist.** The request assumed a running
+   minikube cluster, but there was none; one had to be started — and minikube's
+   Docker driver refused to run as the administrator user until an explicit
+   override was supplied.
+6. **Network rules were not being enforced.** The default cluster networking
+   silently ignores the security network rules, so the cluster had to be
+   recreated with a networking add-on (Calico) that actually enforces them.
+7. **A packaging ordering problem.** The deployment tool needs the namespace to
+   exist before it can install into it, so creating the namespace had to be
+   split out into a separate first step (which also matched the "security
+   first" requirement).
+8. **The security rules initially blocked legitimate traffic.** The default
+   "deny everything" policy also blocked the externally-exposed port, so an
+   explicit "allow external access to the API port" rule had to be added.
+9. **A course-correction on how to expose the service.** The assistant's first
+   approach used a custom forwarding script; on feedback, this was replaced with
+   minikube's own built-in commands for accessing cluster services.
 
 These corrections are the reason every AI-generated output in this project was
 reviewed before being kept.

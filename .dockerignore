@@ -1,0 +1,19 @@
+# VCS / tooling
+.git
+.gitignore
+.claude
+.dockerignore
+Dockerfile
+
+# Kubernetes / Helm (not needed in the build context)
+deploy
+
+# Docs and local assets
+project_docs
+README.md
+PROJECT_SETUP.md
+
+# Build artifacts / editor cruft
+bin
+*.out
+*.log
