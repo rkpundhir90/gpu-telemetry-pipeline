@@ -252,77 +252,31 @@ cover-html: cover
 	go tool cover -html=coverage.out -o coverage.html
 	@echo "wrote coverage.html"
 
-# TimescaleDB (Bitnami + TimescaleDB extension)
-TIMESCALE_IMAGE ?= gpu-telemetry-timescaledb
-TIMESCALE_TAG ?= 0.1.0
-TIMESCALE_RELEASE ?= timescaledb
-TIMESCALE_CHART ?= bitnami/postgresql
-TIMESCALE_VALUES ?= deploy/helm/timescaledb/values.yaml
-
-.PHONY: docker-build-timescaledb minikube-load-timescaledb helm-add-repo-bitnami deploy-timescaledb
-
-docker-build-timescaledb:
-	DOCKER_BUILDKIT=1 docker build -f deploy/build/Dockerfile.timescaledb -t $(TIMESCALE_IMAGE):$(TIMESCALE_TAG) .
-
-minikube-load-timescaledb: docker-build-timescaledb
-	minikube image load $(TIMESCALE_IMAGE):$(TIMESCALE_TAG)
-
-helm-add-repo-bitnami:
-	helm repo add bitnami https://charts.bitnami.com/bitnami || true
-	helm repo update
-
-deploy-timescaledb: minikube-load-timescaledb namespace helm-add-repo-bitnami
-	helm upgrade --install $(TIMESCALE_RELEASE) $(TIMESCALE_CHART) \
-		--namespace $(NAMESPACE) \
-		--set image.repository=$(TIMESCALE_IMAGE) \
-		--set image.tag=$(TIMESCALE_TAG) \
-		--set auth.username=telemetry \
-		--set auth.password=telemetry \
-		--set auth.database=telemetry \
-		--set postgresqlSharedPreloadLibraries='timescaledb' \
-		-f $(TIMESCALE_VALUES) \
-		--wait --timeout 180s
-	kubectl -n $(NAMESPACE) get deploy,statefulset,pod,svc -o wide
-
-# Override: use official TimescaleDB image via Helm (no local Docker build)
+# TimescaleDB (Helm deploy using upstream TimescaleDB image)
 TIMESCALE_IMAGE_REPO ?= timescale/timescaledb
-TIMESCALE_IMAGE_TAG ?= latest-pg15
-TIMESCALE_RELEASE ?= timescaledb
-TIMESCALE_CHART ?= bitnami/postgresql
-TIMESCALE_VALUES ?= deploy/helm/timescaledb/values.yaml
+TIMESCALE_IMAGE_TAG  ?= latest-pg15
+TIMESCALE_RELEASE    ?= timescaledb
+TIMESCALE_CHART      ?= bitnami/postgresql
+TIMESCALE_VALUES     ?= deploy/helm/timescaledb/values.yaml
 
 .PHONY: helm-add-repo-bitnami deploy-timescaledb
 
 helm-add-repo-bitnami:
-	helm repo add bitnami https://charts.bitnami.com/bitnami || true
-	helm repo update
+helm repo add bitnami https://charts.bitnami.com/bitnami || true
+helm repo update
 
-# Deploy TimescaleDB using upstream image; useful for dev clusters.
+# Deploy TimescaleDB using upstream image (no local Docker build). For dev only.
 deploy-timescaledb: namespace helm-add-repo-bitnami
-	helm upgrade --install $(TIMESCALE_RELEASE) $(TIMESCALE_CHART) \
-		--namespace $(NAMESPACE) \
-		--set image.repository=$(TIMESCALE_IMAGE_REPO) \
-		--set image.tag=$(TIMESCALE_IMAGE_TAG) \
-		--set auth.username=telemetry \
-		--set auth.password=telemetry \
-		--set auth.database=telemetry \
-		--set postgresqlSharedPreloadLibraries='timescaledb' \
-		-f $(TIMESCALE_VALUES) \
-		--wait --timeout 180s
-	kubectl -n $(NAMESPACE) get deploy,statefulset,pod,svc -o wide
+helm upgrade --install $(TIMESCALE_RELEASE) $(TIMESCALE_CHART) \
+--namespace $(NAMESPACE) \
+--set image.repository=$(TIMESCALE_IMAGE_REPO) \
+--set image.tag=$(TIMESCALE_IMAGE_TAG) \
+--set auth.username=telemetry \
+--set auth.password=telemetry \
+--set auth.database=telemetry \
+--set postgresqlSharedPreloadLibraries='timescaledb' \
+--set global.security.allowInsecureImages=true \
+-f $(TIMESCALE_VALUES) \
+--wait --timeout 180s
+kubectl -n $(NAMESPACE) get deploy,statefulset,pod,svc -o wide
 
-# Final override: allow non-standard images (enable for dev)
-.PHONY: deploy-timescaledb
-deploy-timescaledb: namespace helm-add-repo-bitnami
-	helm upgrade --install $(TIMESCALE_RELEASE) $(TIMESCALE_CHART) \
-		--namespace $(NAMESPACE) \
-		--set image.repository=$(TIMESCALE_IMAGE_REPO) \
-		--set image.tag=$(TIMESCALE_IMAGE_TAG) \
-		--set auth.username=telemetry \
-		--set auth.password=telemetry \
-		--set auth.database=telemetry \
-		--set postgresqlSharedPreloadLibraries='timescaledb' \
-		--set global.security.allowInsecureImages=true \
-		-f $(TIMESCALE_VALUES) \
-		--wait --timeout 180s
-	kubectl -n $(NAMESPACE) get deploy,statefulset,pod,svc -o wide

@@ -1,5 +1,0 @@
-# Dockerfile: use official TimescaleDB image for Postgres 15
-FROM timescale/timescaledb:pg15
-
-# Official TimescaleDB image already includes the extension and runs as a non-root user.
-# No additional packages required.
