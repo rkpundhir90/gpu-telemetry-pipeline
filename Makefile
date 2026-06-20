@@ -10,7 +10,7 @@ MINIKUBE_FORCE ?= 0
 MINIKUBE_START_ARGS ?=
 
 # Sets up the required infrastructure (Docker, Minikube, kubectl, and Helm)
-setup-infra: install-docker install-minikube install-kubectl install-helm verify
+setup-infra: install-docker install-minikube install-kubectl install-helm verify minikube-start
 
 # Ubuntu/Debian targets
 install-docker:
@@ -85,14 +85,10 @@ verify:
 	@echo "--------------------\n"
 
 start-minikube:
-@echo "Starting Minikube with driver '$(MINIKUBE_DRIVER)' (CNI: calico)..."
-@echo "(Calico is required for the NetworkPolicies in the chart to actually be enforced.)"
-@sh -c 'if [ "$$(id -u)" = "0" ] && [ "$(MINIKUBE_DRIVER)" = "docker" ] && [ "$(MINIKUBE_FORCE)" != "1" ]; then echo "ERROR: running minikube with 'docker' driver as root is not supported."; echo "Run 'make' as a non-root user, or set MINIKUBE_DRIVER=none or MINIKUBE_FORCE=1 to proceed (not recommended)."; exit 1; fi'
-minikube start --driver=$(MINIKUBE_DRIVER) --cni=calico $(MINIKUBE_EXTRA_ARGS) $(MINIKUBE_START_ARGS)
-tart-minikube:
-	@echo "Starting Minikube with Docker driver + Calico CNI (NetworkPolicy enforcement)..."
+	@echo "Starting Minikube with driver '$(MINIKUBE_DRIVER)' (CNI: calico)..."
 	@echo "(Calico is required for the NetworkPolicies in the chart to actually be enforced.)"
-	minikube start --driver=docker --cni=calico $(MINIKUBE_EXTRA_ARGS)
+	@sh -c 'if [ "$$(id -u)" = "0" ] && [ "$(MINIKUBE_DRIVER)" = "docker" ] && [ "$(MINIKUBE_FORCE)" != "1" ]; then echo "ERROR: running minikube with 'docker' driver as root is not supported."; echo "Run 'make' as a non-root user, or set MINIKUBE_DRIVER=none or MINIKUBE_FORCE=1 to proceed (not recommended)."; exit 1; fi'
+	minikube start --driver=$(MINIKUBE_DRIVER) --cni=calico $(MINIKUBE_EXTRA_ARGS) $(MINIKUBE_START_ARGS)
 
 .PHONY: openapi
 
@@ -170,7 +166,7 @@ helm-template:
 
 
 # Full deploy: start minikube, DB, Kafka, images, charts, data load, then API
-deploy: start-minikube minikube-load namespace deploy-timescaledb deploy-kafka deploy-collector deploy-streamer
+deploy: minikube-load namespace deploy-timescaledb deploy-kafka deploy-collector deploy-streamer
 	@echo "Starting full deploy sequence..."
 	@echo "Building API image and loading into minikube, creating namespace, and deploying TimescaleDB and Kafka."
 	helm lint $(CHART_DIR)
@@ -270,4 +266,10 @@ TIMESCALE_VALUES     ?= deploy/helm/timescaledb/values.yaml
 
 .PHONY: deploy-timescaledb
 
-deploy-timescaledb: ./deploy/helm/timescaledb/install.sh
+deploy-timescaledb:
+	./deploy/helm/timescaledb/install.sh
+
+.PHONY: deploy-kafka
+
+deploy-kafka:
+	./deploy/helm/kafka/install.sh
