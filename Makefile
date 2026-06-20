@@ -283,3 +283,30 @@ deploy-timescaledb: minikube-load-timescaledb namespace helm-add-repo-bitnami
 		-f $(TIMESCALE_VALUES) \
 		--wait --timeout 180s
 	kubectl -n $(NAMESPACE) get deploy,statefulset,pod,svc -o wide
+
+# Override: use official TimescaleDB image via Helm (no local Docker build)
+TIMESCALE_IMAGE_REPO ?= timescale/timescaledb
+TIMESCALE_IMAGE_TAG ?= latest-pg15
+TIMESCALE_RELEASE ?= timescaledb
+TIMESCALE_CHART ?= bitnami/postgresql
+TIMESCALE_VALUES ?= deploy/helm/timescaledb/values.yaml
+
+.PHONY: helm-add-repo-bitnami deploy-timescaledb
+
+helm-add-repo-bitnami:
+	helm repo add bitnami https://charts.bitnami.com/bitnami || true
+	helm repo update
+
+# Deploy TimescaleDB using upstream image; useful for dev clusters.
+deploy-timescaledb: namespace helm-add-repo-bitnami
+	helm upgrade --install $(TIMESCALE_RELEASE) $(TIMESCALE_CHART) \
+		--namespace $(NAMESPACE) \
+		--set image.repository=$(TIMESCALE_IMAGE_REPO) \
+		--set image.tag=$(TIMESCALE_IMAGE_TAG) \
+		--set auth.username=telemetry \
+		--set auth.password=telemetry \
+		--set auth.database=telemetry \
+		--set postgresqlSharedPreloadLibraries='timescaledb' \
+		-f $(TIMESCALE_VALUES) \
+		--wait --timeout 180s
+	kubectl -n $(NAMESPACE) get deploy,statefulset,pod,svc -o wide
