@@ -1,0 +1,29 @@
+# Values for deploying Bitnami PostgreSQL with TimescaleDB extension
+# Credentials and database used by the API (matches POSTGRES_DSN secret)
+auth:
+  username: telemetry
+  password: telemetry
+  database: telemetry
+
+# Load timescaledb as a shared_preload_library so the extension can be created
+postgresqlSharedPreloadLibraries: "timescaledb"
+
+# Create the extension at init time (runs only on first initialization)
+primary:
+  initdb:
+    scripts:
+      create_timescale.sql: |
+        -- Create TimescaleDB extension in the telemetry database
+        CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
+
+# Disable persistence for dev clusters (override in prod)
+persistence:
+  enabled: false
+
+resources:
+  requests:
+    memory: "256Mi"
+    cpu: "100m"
+  limits:
+    memory: "512Mi"
+    cpu: "500m"
