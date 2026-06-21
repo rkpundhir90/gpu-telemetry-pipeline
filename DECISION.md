@@ -184,7 +184,9 @@ Once these hold on Kafka, the custom queue is validated against the *same* asser
 - **Trade-off / follow-up:** Kafka is interim, now used by both a `queue.Consumer`
   (Collector) and a `queue.Producer` (Streamer). The remaining step toward the
   brief's actual requirement is a custom implementation of those two interfaces —
-  additive, with no change to the Streamer or Collector logic.
+  additive, with no change to the Streamer or Collector logic. The design of that
+  custom queue (stateless gRPC broker, phased implementation plan, smart flush
+  algorithm, and peer replication strategy) is captured in [QUEUE.md](QUEUE.md).
 
 ---
 

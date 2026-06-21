@@ -20,7 +20,8 @@ an auto-generated OpenAPI spec.
 > implementation** (used for now); dropping in the custom queue later means adding
 > one more `Consumer`/`Producer` implementation, with no change to collector or
 > streamer logic. See [Telemetry Collector](#telemetry-collector) and
-> [Telemetry Streamer](#telemetry-streamer).
+> [Telemetry Streamer](#telemetry-streamer). The design of the custom gRPC-based
+> queue is documented in [QUEUE.md](QUEUE.md).
 
 ## Table of contents
 - [What's in the repo today](#whats-in-the-repo-today)
@@ -74,6 +75,7 @@ deploy/
   helm/timescaledb/              TimescaleDB Helm values (bitnami/postgresql + db-init Job)
 Makefile              build / test / coverage / deploy targets (see "Make targets")
 DECISION.md           design decisions + rationale (DB, queue, Make, Helm)
+QUEUE.md              custom gRPC message queue design (stateless broker, phased plan, smart flush)
 go.mod / go.sum       Go module (module gpu-telemetry-pipeline)
 project_docs/
   AI_PROMPTS.md         how AI assistance was used
@@ -542,7 +544,9 @@ The following is the remaining project goal:
 
 - A **custom message queue** (competing-consumers work queue) replacing Kafka.
   The Streamer and Collector already target `queue.Producer` / `queue.Consumer`
-  interfaces, so this is a drop-in implementation rather than a rewrite.
+  interfaces, so this is a drop-in implementation rather than a rewrite. The
+  architecture — stateless gRPC broker, phased implementation plan, smart flush
+  algorithm, and peer replication — is specified in [QUEUE.md](QUEUE.md).
 
 ## AI assistance
 
