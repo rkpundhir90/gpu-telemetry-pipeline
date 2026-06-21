@@ -31,7 +31,7 @@ kafka:
 postgres:
   # DSN used when existingSecret is empty; a Secret is created from this value so
   # it is not rendered in plaintext into the Deployment manifest.
-  dsn: "postgres://telemetry:telemetry@timescaledb:5432/telemetry?sslmode=disable"
+  dsn: "postgres://telemetry:telemetry@timescaledb-postgresql:5432/telemetry?sslmode=disable"
   # To supply the DSN yourself, set existingSecret (+ secretKey) and leave dsn "".
   existingSecret: ""
   secretKey: "dsn"

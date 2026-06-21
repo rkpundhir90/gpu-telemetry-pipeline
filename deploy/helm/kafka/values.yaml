@@ -1,12 +1,34 @@
-# Minimal values for bitnami/kafka for local dev
+# Single-node Kafka broker using confluentinc/cp-kafka
 replicaCount: 1
 zookeeper:
-  enabled: true
-  replicaCount: 1
+  enabled: false  # Disable ZooKeeper - use KRaft mode
 auth:
   enabled: false
+
+# Allow non-Bitnami images
+global:
+  security:
+    allowInsecureImages: true
+
+# Use Confluent Kafka image (more reliable than apache/kafka for Bitnami chart)
+image:
+  repository: confluentinc/cp-kafka
+  tag: "7.6.0"
+
+# Single node, minimal setup
+broker:
+  replicaCount: 1
+  persistence:
+    enabled: true
+    size: 5Gi
+
+# Enable persistence with local storage for minikube
 persistence:
-  enabled: false
+  enabled: true
+  size: 5Gi
+  storageClass: "standard"
+
+# Minimal resources for single node
 resources:
   requests:
     memory: "256Mi"
@@ -14,3 +36,7 @@ resources:
   limits:
     memory: "512Mi"
     cpu: "500m"
+
+# Kraft mode configuration for single node
+kraft:
+  enabled: true

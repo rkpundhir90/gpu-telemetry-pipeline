@@ -12,7 +12,7 @@ replicaCount: 1
 # into the Deployment manifest; set `existingSecret` (+ `secretKey`) to supply
 # your own and leave `dsn` empty.
 postgres:
-  dsn: "postgres://telemetry:telemetry@timescaledb:5432/telemetry?sslmode=disable"
+  dsn: "postgres://telemetry:telemetry@timescaledb-postgresql:5432/telemetry?sslmode=disable"
   existingSecret: ""
   secretKey: "dsn"
 

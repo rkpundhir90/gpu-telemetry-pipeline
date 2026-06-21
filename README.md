@@ -70,6 +70,8 @@ deploy/
   helm/gpu-telemetry-api/        API Helm chart
   helm/gpu-telemetry-collector/  Collector Helm chart (Deployment + HPA + NetPol)
   helm/gpu-telemetry-streamer/   Streamer Helm chart (Deployment + HPA + NetPol)
+  helm/kafka/                    Single-node Kafka StatefulSet (KRaft, cp-kafka:7.6.0, no Zookeeper)
+  helm/timescaledb/              TimescaleDB Helm values (bitnami/postgresql + db-init Job)
 Makefile              build / test / coverage / deploy targets (see "Make targets")
 DECISION.md           design decisions + rationale (DB, queue, Make, Helm)
 go.mod / go.sum       Go module (module gpu-telemetry-pipeline)
@@ -404,8 +406,30 @@ This runs, in order:
    a dedicated `gpu-telemetry` namespace labelled for the **restricted** Pod
    Security Standard. This is created up-front because Helm writes its release
    secret into the target namespace before applying manifests.
-3. `helm upgrade --install … --wait` — installs the
-   [chart](deploy/helm/gpu-telemetry-api/) into that namespace.
+3. `make deploy-timescaledb` — installs `bitnami/postgresql` with the
+   TimescaleDB image (`timescale/timescaledb:latest-pg15`) and immediately runs a
+   post-install Kubernetes Job ([`db-init-job.yaml`](deploy/helm/timescaledb/db-init-job.yaml))
+   that idempotently creates the `telemetry` database and enables the TimescaleDB
+   extension. The Job uses the application user (`telemetry`) rather than the
+   Postgres superuser, because the superuser password in the Bitnami secret drifts
+   when the PVC is reused across Helm releases.
+4. `make deploy-kafka` — applies [`kafka-statefulset.yaml`](deploy/helm/kafka/kafka-statefulset.yaml),
+   a minimal single-node Kafka broker running in **KRaft mode** (no Zookeeper).
+   `enableServiceLinks: false` prevents Kubernetes from injecting `KAFKA_PORT` into
+   the pod, which the cp-kafka entrypoint otherwise treats as a deprecated config key.
+   `KAFKA_ADVERTISED_LISTENERS` is set to the ClusterIP Service (`kafka:9092`) rather
+   than the headless-pod FQDN, so clients always resolve a stable address regardless
+   of pod identity. A `kafka-allow` NetworkPolicy is co-applied with the StatefulSet
+   because the namespace carries a default-deny policy (deployed by the API chart);
+   without it, Calico silently drops every connection to the broker — including the
+   KRaft controller port (9093) the broker uses to contact itself.
+5. `make deploy-collector` — builds + loads the Collector image, then installs
+   the Collector chart (Deployment + HPA).
+6. `make deploy-streamer` — provisions the data PVC, copies the CSV onto it,
+   builds + loads the Streamer image, then installs the Streamer chart (Deployment + HPA).
+7. `make deploy-api` — builds + loads the API image, then `helm lint` +
+   `helm upgrade --install … --wait` installs the
+   [API chart](deploy/helm/gpu-telemetry-api/) into that namespace.
 
 Check what's running:
 
@@ -427,11 +451,15 @@ The deployment is hardened by default:
   `RuntimeDefault` seccomp profile. A writable `emptyDir` is mounted at `/tmp`.
 - **ServiceAccount with token auto-mount disabled** — the API does not talk to
   the Kubernetes API, so no token is projected into the pod (no RBAC granted).
-- **NetworkPolicies** (enforced by Calico): default-deny all ingress/egress,
-  then allow only what each service needs — DNS egress everywhere; the API adds
-  Postgres egress, in-namespace HTTP, and (because it is exposed) external
-  ingress to the API port; the Collector adds Kafka/Postgres egress and health
-  ingress; the Streamer adds Kafka egress and health ingress.
+- **NetworkPolicies** (enforced by Calico): the API chart applies a
+  namespace-wide default-deny (`podSelector: {}`, Ingress + Egress), then each
+  component ships an explicit allow policy. DNS egress is permitted everywhere;
+  the API adds Postgres egress, in-namespace HTTP, and external ingress to its
+  port; the Collector adds Kafka/Postgres egress and health ingress; the Streamer
+  adds Kafka egress and health ingress; and Kafka itself has a `kafka-allow`
+  policy that opens broker port 9092 to all namespace pods, controller port 9093
+  for KRaft self-coordination, and DNS egress — without which Calico silently
+  drops every connection to the broker.
 
 ## Accessing the service
 
@@ -470,8 +498,10 @@ no extra configuration is needed.
 | `make docker-build` | Build the image `gpu-telemetry-api:0.1.0`. |
 | `make minikube-load` | Build, then load the image into minikube. |
 | `make namespace` | Create + label the hardened `gpu-telemetry` namespace. |
-| `make helm-lint` / `make helm-template` | Lint / render the chart. |
-| `make deploy` | Full API pipeline: build → load → namespace → helm install. |
+| `make helm-lint` / `make helm-template` | Lint / render the API chart. |
+| `make deploy` | Full pipeline: TimescaleDB → Kafka → Collector → Streamer → API (build, load, and install all charts). |
+| `make deploy-timescaledb` | Deploy TimescaleDB (bitnami/postgresql chart + db-init Job to create the database and extension). |
+| `make deploy-kafka` | Deploy single-node Kafka in KRaft mode (StatefulSet, no Zookeeper). |
 | `make docker-build-collector` | Build the collector image `gpu-telemetry-collector:0.1.0`. |
 | `make deploy-collector` | Build → load → install the collector chart (Deployment + HPA). |
 | `make undeploy-collector` | Uninstall the collector release. |
@@ -479,9 +509,11 @@ no extra configuration is needed.
 | `make load-streamer-data` | Provision the data PVC and copy the CSV onto it. |
 | `make deploy-streamer` | Load data → build → load → install the streamer chart (Deployment + HPA). |
 | `make undeploy-streamer` | Uninstall the streamer release. |
+| `make deploy-api` | Build → load API image → install the API Helm chart (Deployment + Service + NetworkPolicy). |
+| `make undeploy-api` | Uninstall the API Helm release (leaves the namespace intact). |
 | `make status` | Show workloads + security objects in the namespace. |
 | `make service-url` / `make expose` | Print URL / open a tunnel for host access. |
-| `make undeploy` | Uninstall the release and delete the namespace. |
+| `make undeploy` | Uninstall the API release and delete the namespace. |
 | `make openapi` | Regenerate the OpenAPI spec from handler annotations. |
 | `make test` | Run all unit tests with the race detector. |
 | `make cover` | Run tests and print total statement coverage. |

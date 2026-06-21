@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wsl -d Ubuntu -e bash -lc 'cd /root/projects/gpu-telemetry-pipeline && go version && echo \"--- build ---\" && go build ./... 2>&1 | head -40')",
+      "Bash(wsl -d Ubuntu -e bash -lc 'which go || ls /usr/local/go/bin 2>/dev/null || ls $HOME/go/bin 2>/dev/null; echo \"PATH=$PATH\"; for p in /usr/local/go/bin/go /usr/lib/go/bin/go /snap/bin/go $HOME/go/bin/go; do [ -x \"$p\" ] && echo \"found:$p\"; done')",
+      "Bash(wsl -d Ubuntu -e bash -lc 'cd /root/projects/gpu-telemetry-pipeline && export PATH=/usr/local/go/bin:$PATH && go version && echo \"--- build ---\" && go build ./... 2>&1 | head -40')",
+      "Bash(wsl.exe -d Ubuntu bash -lc 'cd /root/projects/gpu-telemetry-pipeline && go build ./... && echo BUILD_OK && go test ./... 2>&1 | tail -20')",
+      "Read(///wsl.localhost/Ubuntu/root/projects/**)",
+      "Bash(wsl.exe -d Ubuntu bash -lc 'cd /root/projects/gpu-telemetry-pipeline && for c in api collector streamer; do echo \"=== $c ===\"; helm lint deploy/helm/gpu-telemetry-$c >/dev/null && helm template r deploy/helm/gpu-telemetry-$c -n gpu-telemetry | grep -E \"replicas:|minReplicas:|maxReplicas:\"; done')"
+    ]
+  }
+}

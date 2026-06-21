@@ -91,8 +91,11 @@ Kafka → Collector → TimescaleDB → API).
   brings up Kafka + TimescaleDB + Streamer + Collector + API; query it at
   `http://localhost:8080/api/v1/gpus`. Scale with
   `--scale streamer=3 --scale collector=3`.
-- **minikube:** load the Streamer's data PVC (`make load-streamer-data`), then
-  `make deploy`, `make deploy-collector`, and `make deploy-streamer`.
+- **minikube:** a single `make deploy` orchestrates the full sequence —
+  `deploy-timescaledb` (Bitnami PostgreSQL + db-init Job to create the database),
+  `deploy-kafka` (single-node KRaft broker), `deploy-collector`, `deploy-streamer`,
+  and finally the API Helm chart. Individual targets can also be run in isolation
+  (e.g. `make deploy-kafka` after updating the Kafka config).
 
 > For the full command reference and the security model, see the
 > [README](README.md).

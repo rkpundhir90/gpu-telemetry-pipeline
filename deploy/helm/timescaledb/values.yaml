@@ -15,10 +15,36 @@ primary:
       create_timescale.sql: |
         -- Create TimescaleDB extension in the telemetry database
         CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
+  # Add emptyDir volume for /var/run/postgresql (needed for socket file)
+  podSecurityContext:
+    enabled: true
+    fsGroup: 999
+  extraVolumes:
+    - name: run
+      emptyDir: {}
+  extraVolumeMounts:
+    - name: run
+      mountPath: /var/run/postgresql
 
-# Disable persistence for dev clusters (override in prod)
+# Enable persistence for data
 persistence:
+  enabled: true
+  size: 8Gi
+
+# Disable initdb permissions check
+initdbScriptsPermissions:
   enabled: false
+
+# Container security - disable read-only root
+containerSecurityContext:
+  enabled: true
+  runAsUser: 999
+  runAsNonRoot: true
+  readOnlyRootFilesystem: false
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
 
 resources:
   requests:

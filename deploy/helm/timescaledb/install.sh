@@ -6,7 +6,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 NAMESPACE="${NAMESPACE:-gpu-telemetry}"
 TIMESCALE_RELEASE="${TIMESCALE_RELEASE:-timescaledb}"
 TIMESCALE_CHART="${TIMESCALE_CHART:-bitnami/postgresql}"
-TIMESCALE_VALUES="${TIMESCALE_VALUES:-$REPO_ROOT/deploy/helm/timescaledb/values.yaml}"
+TIMESCALE_VALUES="${TIMESCALE_VALUES:-$REPO_ROOT/helm/timescaledb/values.yaml}"
 IMAGE_REPO="${TIMESCALE_IMAGE_REPO:-timescale/timescaledb}"
 IMAGE_TAG="${TIMESCALE_IMAGE_TAG:-latest-pg15}"
 ALLOW_INSECURE_IMAGES="${ALLOW_INSECURE_IMAGES:-true}"
@@ -20,7 +20,7 @@ command -v kubectl >/dev/null 2>&1 || { echo "kubectl not found; install kubectl
 # Ensure namespace exists
 if ! kubectl get ns "$NAMESPACE" >/dev/null 2>&1; then
   echo "Creating namespace $NAMESPACE"
-  kubectl apply -f "$REPO_ROOT/deploy/namespace.yaml"
+  kubectl apply -f "$REPO_ROOT/namespace.yaml"
 fi
 
 echo "Adding/updating Helm repo bitnami..."
@@ -42,6 +42,19 @@ for i in $(seq 1 $attempts); do
        "${set_args[@]}" \
        --wait --timeout 180s --atomic; then
     echo "Helm deploy succeeded"
+
+    echo "Running db-init Job to ensure database and extension exist..."
+    # Delete any previous run so kubectl wait has a clean job to watch.
+    kubectl delete job timescaledb-db-init -n "$NAMESPACE" --ignore-not-found
+    kubectl apply -f "$SCRIPT_DIR/db-init-job.yaml"
+    if kubectl wait --for=condition=complete job/timescaledb-db-init \
+         -n "$NAMESPACE" --timeout=120s; then
+      echo "✓ Database init complete"
+    else
+      echo "db-init Job did not complete — check: kubectl logs -n $NAMESPACE -l app=timescaledb-db-init"
+      exit 1
+    fi
+
     kubectl -n "$NAMESPACE" get deploy,statefulset,pod,svc -o wide
     exit 0
   else

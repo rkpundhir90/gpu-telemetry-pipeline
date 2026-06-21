@@ -1,16 +1,12 @@
-.PHONY: setup-infra install-docker install-minikube install-kubectl install-helm verify start-minikube
+.PHONY: setup-infra install-docker install-minikube install-kubectl install-helm verify start-minikube stop-minikube
 
-# Check for existing installations
-DOCKER_BIN := $(shell command -v docker 2> /dev/null)
-MINIKUBE_BIN := $(shell command -v minikube 2> /dev/null)
-KUBECTL_BIN := $(shell command -v kubectl 2> /dev/null)
-HELM_BIN := $(shell command -v helm 2> /dev/null)
+# Use docker driver by default
 MINIKUBE_DRIVER ?= docker
 MINIKUBE_FORCE ?= 0
 MINIKUBE_START_ARGS ?=
 
 # Sets up the required infrastructure (Docker, Minikube, kubectl, and Helm)
-setup-infra: install-docker install-minikube install-kubectl install-helm verify minikube-start
+setup-infra: install-docker install-minikube install-kubectl install-helm verify start-minikube
 
 # Ubuntu/Debian targets
 install-docker:
@@ -87,8 +83,14 @@ verify:
 start-minikube:
 	@echo "Starting Minikube with driver '$(MINIKUBE_DRIVER)' (CNI: calico)..."
 	@echo "(Calico is required for the NetworkPolicies in the chart to actually be enforced.)"
-	@sh -c 'if [ "$$(id -u)" = "0" ] && [ "$(MINIKUBE_DRIVER)" = "docker" ] && [ "$(MINIKUBE_FORCE)" != "1" ]; then echo "ERROR: running minikube with 'docker' driver as root is not supported."; echo "Run 'make' as a non-root user, or set MINIKUBE_DRIVER=none or MINIKUBE_FORCE=1 to proceed (not recommended)."; exit 1; fi'
-	minikube start --driver=$(MINIKUBE_DRIVER) --cni=calico $(MINIKUBE_EXTRA_ARGS) $(MINIKUBE_START_ARGS)
+	minikube start --driver=$(MINIKUBE_DRIVER) --cni=calico --force $(MINIKUBE_EXTRA_ARGS) $(MINIKUBE_START_ARGS)
+
+stop-minikube:
+	@echo "Stopping and deleting Minikube cluster..."
+	-minikube delete --all --force
+	@echo "Cleaning up minikube data directory..."
+	-rm -rf ~/.minikube
+	@echo "✅ Minikube cluster removed!"
 
 .PHONY: openapi
 
@@ -123,7 +125,7 @@ STREAMER_CSV_NAME  ?= dcgm_metrics.csv
 .PHONY: docker-build minikube-load namespace helm-lint helm-template deploy undeploy status expose service-url
 .PHONY: docker-build-collector minikube-load-collector deploy-collector undeploy-collector
 .PHONY: docker-build-streamer minikube-load-streamer deploy-streamer undeploy-streamer load-streamer-data
-.PHONY: deploy-all undeploy-all
+.PHONY: deploy-api undeploy-api deploy-all undeploy-all
 
 # Dockerfiles live under deploy/build; the build context is the repo root (where
 # the Go module is), passed as the final ".".
@@ -165,14 +167,24 @@ helm-template:
 	helm template $(RELEASE) $(CHART_DIR) --namespace $(NAMESPACE)
 
 
-# Full deploy: start minikube, DB, Kafka, images, charts, data load, then API
-deploy: minikube-load namespace deploy-timescaledb deploy-kafka deploy-collector deploy-streamer
-	@echo "Starting full deploy sequence..."
-	@echo "Building API image and loading into minikube, creating namespace, and deploying TimescaleDB and Kafka."
+# Deploy the API chart (expects the namespace + backing services to already
+# exist). Builds + loads the image, then installs / upgrades the API release.
+# For the full pipeline in one command use `make deploy`.
+deploy-api: minikube-load namespace
 	helm lint $(CHART_DIR)
-	helm upgrade --install $(RELEASE) $(CHART_DIR) --namespace $(NAMESPACE) --create-namespace=false --wait --timeout 180s
+	helm upgrade --install $(RELEASE) $(CHART_DIR) \
+		--namespace $(NAMESPACE) \
+		--create-namespace=false \
+		--wait --timeout 180s
 	kubectl -n $(NAMESPACE) get deploy,pod,svc -o wide
-	@echo "Deployment complete. Run 'make service-url' or visit the API Swagger to test."
+	@echo "✅ API deployed. Run 'make service-url' or visit /swagger/index.html."
+
+undeploy-api:
+	-helm uninstall $(RELEASE) --namespace $(NAMESPACE)
+
+# Full deploy: TimescaleDB → Kafka → Collector → Streamer → API.
+deploy: deploy-timescaledb deploy-kafka deploy-collector deploy-streamer deploy-api
+	@echo "✅ Full pipeline deployed to namespace $(NAMESPACE). Run 'make service-url' to connect."
 
 # Show what is running in the namespace, including the security posture.
 status:
@@ -227,10 +239,9 @@ deploy-streamer: minikube-load-streamer namespace load-streamer-data
 undeploy-streamer:
 	-helm uninstall $(STREAMER_RELEASE) --namespace $(NAMESPACE)
 
-# One-stop deploy of the whole pipeline: API + Collector + Streamer. Assumes a
-# running minikube (`make start-minikube`) and reachable Kafka/TimescaleDB.
-deploy-all: deploy deploy-collector deploy-streamer
-	@echo "✅ deployed API + Collector + Streamer to namespace $(NAMESPACE)"
+# Alias for `make deploy` kept for backwards compatibility.
+deploy-all: deploy
+	@echo "✅ Full pipeline deployed to namespace $(NAMESPACE)."
 
 # Remove the API release and the dedicated namespace.
 undeploy:

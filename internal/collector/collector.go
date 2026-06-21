@@ -137,11 +137,17 @@ func (c *Collector) Run(ctx context.Context) error {
 // the consumer errors. It always closes items and reports the terminating error.
 func (c *Collector) fetchLoop(ctx context.Context, items chan<- item, fetchErr chan<- error) {
 	defer close(items)
+	c.log.Info("fetch loop started — waiting for messages from queue")
+	var fetched int64
 	for {
 		msg, err := c.consumer.Fetch(ctx)
 		if err != nil {
 			fetchErr <- err
 			return
+		}
+		fetched++
+		if fetched == 1 {
+			c.log.Info("first message received from queue", "bytes", len(msg.Value))
 		}
 
 		it := item{msg: msg}
@@ -151,7 +157,15 @@ func (c *Collector) fetchLoop(ctx context.Context, items chan<- item, fetchErr c
 		}
 		if perr != nil {
 			c.stats.Dropped.Add(1)
-			c.log.Warn("dropping unparseable message", "error", perr, "bytes", len(msg.Value))
+			preview := string(msg.Value)
+			if len(preview) > 200 {
+				preview = preview[:200] + "..."
+			}
+			c.log.Warn("dropping unparseable message",
+				"error", perr,
+				"bytes", len(msg.Value),
+				"preview", preview,
+			)
 			// parsed stays false: not stored, but still committed downstream.
 		} else {
 			it.record = rec
@@ -206,6 +220,13 @@ func (c *Collector) flush(batch []item) []item {
 
 	c.stats.Persisted.Add(int64(len(records)))
 	c.stats.Batches.Add(1)
-	c.log.Debug("flushed batch", "persisted", len(records), "committed", len(msgs))
+	c.log.Info("flushed batch",
+		"parsed", len(records),
+		"dropped_in_batch", len(msgs)-len(records),
+		"committed", len(msgs),
+		"total_persisted", c.stats.Persisted.Load(),
+		"total_dropped", c.stats.Dropped.Load(),
+		"batches", c.stats.Batches.Load(),
+	)
 	return batch[:0]
 }

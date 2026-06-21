@@ -13,6 +13,8 @@ lightweight ADRs (Architecture Decision Records): each one captures the
 3. [Build & developer workflow: the Makefile](#3-build--developer-workflow-the-makefile)
 4. [Deployment: Helm charts on minikube](#4-deployment-helm-charts-on-minikube)
 5. [Telemetry Streamer: stateless replay, data on a PVC](#5-telemetry-streamer-stateless-replay-data-on-a-pvc)
+6. [Kafka deployment: direct StatefulSet in KRaft mode](#6-kafka-deployment-direct-statefulset-in-kraft-mode)
+7. [TimescaleDB database initialisation: post-install Job](#7-timescaledb-database-initialisation-post-install-job)
 
 ---
 
@@ -355,3 +357,139 @@ scales as competing consumers. The store's idempotency key
   node. On a multi-node cluster this becomes `ReadOnlyMany` (with a provisioner
   that supports it) or a per-pod init container that fetches the data — a values
   change, not a redesign.
+
+---
+
+## 6. Kafka deployment: direct StatefulSet in KRaft mode
+
+**Status:** Accepted (dev/test)
+
+### Context
+
+The pipeline needs a single Kafka broker on minikube for dev and testing. The
+initial approach used the `bitnami/kafka` Helm chart, which brought in ZooKeeper,
+rolling-upgrade complexity, and repeated Helm `SECURITY WARNING` noise because
+the Bitnami chart was designed for the Bitnami Kafka image, not the Confluent
+Platform image (`confluentinc/cp-kafka`).
+
+Two additional issues surfaced:
+
+1. **`port is deprecated` warning.** Kubernetes automatically injects a
+   `KAFKA_PORT` environment variable into every pod in the namespace whenever a
+   `Service` named `kafka` exists. The cp-kafka entrypoint interprets all
+   `KAFKA_*` env vars as broker config and warns that `port` is a deprecated key.
+2. **KRaft config incomplete.** The initial config set `KAFKA_ZOOKEEPER_CONNECT`
+   with no ZooKeeper sidecar; cp-kafka 7.6.0 fell back to KRaft mode but was
+   missing the required keys (`KAFKA_PROCESS_ROLES`, `KAFKA_NODE_ID`,
+   `KAFKA_CONTROLLER_QUORUM_VOTERS`, `CLUSTER_ID`, `KAFKA_CONTROLLER_LISTENER_NAMES`),
+   so the broker never finished starting.
+
+### Decision
+
+Replace the Bitnami Helm chart with a **direct YAML StatefulSet**
+([`deploy/helm/kafka/kafka-statefulset.yaml`](deploy/helm/kafka/kafka-statefulset.yaml))
+using `confluentinc/cp-kafka:7.6.0` in **KRaft mode** (no ZooKeeper):
+
+- All required KRaft config keys are set explicitly in a ConfigMap.
+- A fixed `CLUSTER_ID` makes the storage format deterministic across restarts.
+- `enableServiceLinks: false` on the pod spec prevents Kubernetes from injecting
+  `KAFKA_PORT` (and other service env vars) into the container.
+
+### Alternatives considered
+
+- **Keep bitnami/kafka with Bitnami's Kafka image.** Rejected: Bitnami's image
+  tag scheme (`X.Y.Z-debian-12-rX`) diverges from the Confluent versioning the
+  rest of the docs and tooling reference. The Bitnami chart also brings ZooKeeper
+  by default, adding resource overhead and config surface that is unnecessary for
+  a single dev broker.
+- **Configure ZooKeeper as a sidecar.** Rejected: KRaft (ZooKeeper-less) is the
+  current direction for all Kafka 3.x+ deployments and is fully supported in
+  cp-kafka 7.6.0. Adding a ZooKeeper sidecar would be moving against the grain
+  for no benefit.
+
+### Consequences
+
+- **Positive:** No ZooKeeper, no Bitnami image substitution warnings, no
+  spurious `KAFKA_PORT` deprecation noise. The broker starts cleanly in KRaft
+  mode with a single pod.
+- **Trade-off:** A hand-maintained YAML StatefulSet rather than a Helm chart;
+  acceptable for a single-broker dev/test deployment but would be replaced by the
+  Confluent Helm chart (`confluentinc/cp-helm-charts`) for production.
+- **`KAFKA_ADVERTISED_LISTENERS` uses the ClusterIP Service, not the headless
+  pod FQDN.** The advertised listener is `PLAINTEXT://kafka:9092` (the stable
+  ClusterIP) rather than `PLAINTEXT://kafka-0.kafka-headless.…:9092`. Clients
+  always resolve the same stable address; the headless Service is still used for
+  KRaft quorum voters (port 9093), which the broker contacts via the pod FQDN on
+  controller startup.
+- **Default-deny NetworkPolicy requires an explicit `kafka-allow` rule.**  The
+  API chart applies a namespace-wide default-deny (`podSelector: {}`, Ingress +
+  Egress) so that all Calico-enforced NetworkPolicies in the namespace are opt-in.
+  The Kafka pod is subject to this policy like any other pod, but it ships no
+  Helm chart, so it has no auto-generated allow rule. Without an explicit
+  `kafka-allow` NetworkPolicy, Calico silently drops every connection to the
+  broker — including the KRaft controller port (9093) the broker uses to contact
+  itself for quorum, causing Kafka to enter an unhealthy state. The
+  `kafka-allow` policy, co-applied with the StatefulSet, explicitly opens:
+  broker port 9092 ingress from any namespace pod, controller port 9093
+  self-ingress/egress (KRaft quorum), and DNS egress to `kube-system`.
+
+---
+
+## 7. TimescaleDB database initialisation: post-install Job
+
+**Status:** Accepted
+
+### Context
+
+The Bitnami `bitnami/postgresql` chart creates the application database (and
+runs `initdb` scripts) **only on a fresh, empty data directory**. If the
+PersistentVolumeClaim already exists from a previous Helm release — for example,
+after a failed first deploy or after re-running `helm upgrade` — the initdb
+phase is skipped entirely and the `telemetry` database is never created. The
+collector and API pods then crash with `FATAL: database "telemetry" does not
+exist`.
+
+A second issue: the Bitnami chart generates the postgres superuser password
+during first init and stores it in a Kubernetes Secret. If the PVC is reused
+across Helm releases with different auth values, the password in the Secret
+drifts from the password in PostgreSQL, so any Job connecting as `postgres` with
+the Secret's value fails authentication.
+
+### Decision
+
+After every `helm upgrade --install` in
+[`deploy/helm/timescaledb/install.sh`](deploy/helm/timescaledb/install.sh),
+apply a Kubernetes Job
+([`deploy/helm/timescaledb/db-init-job.yaml`](deploy/helm/timescaledb/db-init-job.yaml))
+that:
+
+1. Connects as the **`telemetry` application user** (whose password is always
+   in sync in the Secret because it is set on every Helm upgrade via `--set
+   auth.password`), not the postgres superuser.
+2. Checks whether the `telemetry` database exists; creates it if not (`telemetry`
+   has the `CREATEDB` role attribute, granted by the Bitnami chart).
+3. Runs `CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;` inside the database.
+4. Self-cleans via `ttlSecondsAfterFinished: 300`.
+
+The `install.sh` blocks on `kubectl wait --for=condition=complete` before
+declaring the deploy successful, so a failed database init surfaces as a deploy
+failure rather than a silent crash loop later.
+
+### Alternatives considered
+
+- **Rely solely on the Bitnami `primary.initdb.scripts` mechanism.** Rejected:
+  initdb only runs on a fresh PVC, making the deploy fragile when PVCs persist
+  across re-deploys (the normal case on minikube).
+- **Connect as postgres superuser.** Rejected: the postgres superuser password
+  in the Secret drifts from the value stored in PostgreSQL when the PVC is
+  reused across Helm releases (a [documented Bitnami behaviour](https://github.com/bitnami/charts/tree/main/bitnami/postgresql#password-update)).
+  Using the application user avoids this entirely.
+
+### Consequences
+
+- **Positive:** The database and extension exist after every deploy, regardless
+  of PVC history. The pattern is idempotent and safe to re-run.
+- **Positive:** No tight coupling to the Bitnami initdb lifecycle; the Job works
+  whether the PVC is brand new or years old.
+- **Trade-off:** One extra Kubernetes object and one extra blocking step in the
+  install script; the overhead is negligible (~5 s) for a dev/test deployment.

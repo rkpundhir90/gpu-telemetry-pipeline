@@ -111,7 +111,11 @@ func (s *Streamer) Run(ctx context.Context) error {
 		}
 
 		loops := s.stats.Loops.Add(1)
-		s.log.Debug("completed dataset pass", "loop", loops, "streamed", s.stats.Streamed.Load())
+		s.log.Info("completed dataset pass",
+			"loop", loops,
+			"streamed", s.stats.Streamed.Load(),
+			"publish_errors", s.stats.PublishErrs.Load(),
+		)
 		if !s.cfg.Loop {
 			s.log.Info("streamer finished", "streamed", s.stats.Streamed.Load())
 			return nil
@@ -143,5 +147,15 @@ func (s *Streamer) publish(ctx context.Context, rec *telemetry.Record) {
 		s.log.Error("publish failed", "error", err, "uuid", rec.UUID, "metric", rec.MetricName)
 		return
 	}
-	s.stats.Streamed.Add(1)
+	n := s.stats.Streamed.Add(1)
+	// Log the first publish and then every 500th to confirm Kafka connectivity
+	// without flooding the log at high throughput.
+	if n == 1 || n%500 == 0 {
+		s.log.Info("publishing records",
+			"streamed", n,
+			"publish_errors", s.stats.PublishErrs.Load(),
+			"uuid", rec.UUID,
+			"metric", rec.MetricName,
+		)
+	}
 }
