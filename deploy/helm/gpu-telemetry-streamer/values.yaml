@@ -23,9 +23,12 @@ autoscaling:
   # targetMemoryUtilizationPercentage: 80   # optional
 
 # Application configuration (injected as env vars; see internal/config)
-kafka:
-  brokers: "kafka:9092"
-  topic: "gpu-telemetry"
+queue:
+  type: "kafka" # "kafka" or "grpc"
+  addr: "localhost:50051"
+  kafka:
+    brokers: "kafka:9092"
+    topic: "gpu-telemetry"
 
 # Telemetry data source. The CSV lives on a PersistentVolume and is loaded at
 # runtime, so it is provisioned independently of the image. Load it onto the

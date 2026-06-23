@@ -1,0 +1,21 @@
+replicaCount: 1
+
+image:
+  repository: gpu-telemetry-queue
+  tag: 0.1.0
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 50051
+
+env:
+  QUEUE_LISTEN_ADDR: ":50051"
+
+resources:
+  limits:
+    cpu: 100m
+    memory: 128Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi

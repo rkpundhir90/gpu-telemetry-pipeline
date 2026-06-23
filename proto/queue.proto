@@ -1,0 +1,52 @@
+syntax = "proto3";
+
+package queue;
+
+option go_package = "gpu-telemetry-pipeline/internal/queue/grpc";
+
+service QueueService {
+  // Produce appends messages to the end of a topic.
+  rpc Produce(ProduceRequest) returns (ProduceResponse);
+
+  // Consume retrieves the next available message for a specific consumer group.
+  // This call will block (long-poll) until a message is available.
+  rpc Consume(ConsumeRequest) returns (ConsumeResponse);
+
+  // Commit acknowledges a specific offset as processed.
+  rpc Commit(CommitRequest) returns (CommitResponse);
+}
+
+message ProduceRequest {
+  string topic = 1;
+  repeated MessagePayload messages = 2;
+}
+
+message MessagePayload {
+  bytes key = 1;
+  bytes value = 2;
+}
+
+message ProduceResponse {
+  repeated int64 offsets = 1;
+}
+
+message ConsumeRequest {
+  string topic = 1;
+  string group_id = 2;
+}
+
+message ConsumeResponse {
+  bytes key = 1;
+  bytes value = 2;
+  int64 offset = 3;
+}
+
+message CommitRequest {
+  string topic = 1;
+  string group_id = 2;
+  int64 offset = 3;
+}
+
+message CommitResponse {
+  bool success = 1;
+}

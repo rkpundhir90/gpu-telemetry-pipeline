@@ -3,8 +3,8 @@
 These are the steps used to bootstrap the project from scratch. They cover
 initialising the Go module, adding the web framework and API documentation, and
 creating the first routes so the service can be deployed to minikube for an
-early end-to-end check — then standing up the full data pipeline (Streamer →
-Kafka → Collector → TimescaleDB → API).
+early end-to-end check — then standing up the full data pipeline (Streamer $\rightarrow$
+Queue $\rightarrow$ Collector $\rightarrow$ TimescaleDB $\rightarrow$ API).
 
 > For the full build, test, and deployment workflow, see the [README](README.md).
 
@@ -30,7 +30,7 @@ Kafka → Collector → TimescaleDB → API).
 
 ## 5. Containerise the API
 
-- Add a multi-stage Dockerfile under [`deploy/build/`](deploy/build/): build a
+- Add a multi-stage Dockerfile under [`deploy/build/`](deploy/build基础上): build a
   static binary in a Go stage, then copy it into a minimal
   `distroless/static:nonroot` runtime stage.
 - Add a [`.dockerignore`](.dockerignore) to keep the build context small.
@@ -52,24 +52,27 @@ Kafka → Collector → TimescaleDB → API).
 ## 8. Deploy with Helm
 
 - Install the chart in [`deploy/helm/gpu-telemetry-api`](deploy/helm/gpu-telemetry-api)
-  into that namespace. The full pipeline (build → load image → namespace →
+  into that namespace. The full pipeline (build $\rightarrow$ load image $\rightarrow$ namespace $\rightarrow$
   install) is a single target: `make deploy`.
 - Verify: `make status`, then `curl http://$(minikube ip):30080/healthz`.
 
 ## 9. Access from the host
 
 - Expose the NodePort service to the host using minikube's native tunnel
-  (no `kubectl port-forward`): `make service-url`, then reach it from the
+  (no `kubectl port-forward`), then reach it from the
   Windows host at `http://localhost:<port>`.
 
-## 10. Build the data pipeline (Streamer + Collector)
+## 10. Build the data pipeline (Queue, Streamer + Collector)
 
 - Define the shared on-the-wire `telemetry.Record`, a technology-agnostic
-  `queue` package (`Consumer` for the Collector, `Producer` for the Streamer)
-  with a Kafka implementation, and a `store` package (`TelemetryStore` write +
-  `TelemetryReader` read) with a TimescaleDB implementation.
-- **Collector** ([`internal/collector`](internal/collector/)): consume → batch →
-  persist → commit, with at-least-once delivery and idempotent inserts. Its own
+  `queue` package (`Consumer` for the Collector, `Producer` for the Streamer).
+- **Custom gRPC Queue**: Implement the stateless in-memory broker (`cmd/queue`) and
+  corresponding gRPC client (`internal/queue/grpc`). Deploy as a standalone
+  service via Helm (`deploy/helm/gpu-telemetry-queue`).
+- **Kafka Implementation**: Provide a Kafka-backed implementation as a reference
+  and interim solution (`internal/queue/kafka`).
+- **Collector** ([`internal/collector`](internal/collector/)): consume $\rightarrow$ batch $\rightarrow$
+  persist $\rightarrow$ commit, with at-least-once delivery and idempotent inserts. Its own
   image ([`Dockerfile.collector`](deploy/build/Dockerfile.collector)) and Helm
   chart with an HPA so it scales independently.
 - **Streamer** ([`internal/streamer`](internal/streamer/)): replay the CSV onto
@@ -91,11 +94,11 @@ Kafka → Collector → TimescaleDB → API).
   brings up Kafka + TimescaleDB + Streamer + Collector + API; query it at
   `http://localhost:8080/api/v1/gpus`. Scale with
   `--scale streamer=3 --scale collector=3`.
-- **minikube:** a single `make deploy` orchestrates the full sequence —
-  `deploy-timescaledb` (Bitnami PostgreSQL + db-init Job to create the database),
-  `deploy-kafka` (single-node KRaft broker), `deploy-collector`, `deploy-streamer`,
-  and finally the API Helm chart. Individual targets can also be run in isolation
-  (e.g. `make deploy-kafka` after updating the Kafka config).
-
-> For the full command reference and the security model, see the
-> [README](README.md).
+- **minikube:** a single `make deploy` orchestrates the full sequence:
+  `deploy-timescaledb` $\rightarrow$ `deploy-queue` (Custom gRPC) $\rightarrow$ `deploy-collector` $\rightarrow$ `deploy-streamer` $\rightarrow$ `deploy-api`.
+  
+  You can switch the pipeline to use the custom gRPC queue by running:
+  ```bash
+  make deploy QUEUE_TYPE=grpc QUEUE_ADDR=gpu-telemetry-queue:50051
+  ```
+  Or use Kafka by setting `QUEUE_TYPE=kafka`.

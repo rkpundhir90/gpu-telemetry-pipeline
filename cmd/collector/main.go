@@ -1,8 +1,8 @@
-// Command collector runs the Telemetry Collector: it joins a Kafka consumer
-// group, consumes GPU telemetry, and persists it to PostgreSQL/TimescaleDB.
+// Command collector runs the Telemetry Collector: it consumes GPU telemetry,
+// and persists it to PostgreSQL/TimescaleDB.
 //
 // Horizontal scaling is achieved by running multiple replicas with the same
-// KAFKA_GROUP_ID; Kafka rebalances partitions across them. See deploy/helm for
+// consumer group ID; the queue distributes messages among them. See deploy/helm for
 // the Deployment + HorizontalPodAutoscaler.
 package main
 
@@ -19,7 +19,9 @@ import (
 
 	"gpu-telemetry-pipeline/internal/collector"
 	"gpu-telemetry-pipeline/internal/config"
+	grpcqueue "gpu-telemetry-pipeline/internal/queue/grpc"
 	kafkaqueue "gpu-telemetry-pipeline/internal/queue/kafka"
+	"gpu-telemetry-pipeline/internal/queue"
 	"gpu-telemetry-pipeline/internal/store/postgres"
 )
 
@@ -38,8 +40,6 @@ func main() {
 }
 
 func run(ctx context.Context, cfg config.Collector, log *slog.Logger) error {
-	// Bound the initial connect so a misconfigured DSN fails fast instead of
-	// hanging the pod's startup.
 	connectCtx, cancelConnect := context.WithTimeout(ctx, 30*time.Second)
 	defer cancelConnect()
 
@@ -54,8 +54,6 @@ func run(ctx context.Context, cfg config.Collector, log *slog.Logger) error {
 	}()
 
 	if err := st.EnsureSchema(connectCtx); err != nil {
-		// Missing TimescaleDB is non-fatal: the table still works as plain
-		// PostgreSQL. Any other schema error is fatal.
 		if errors.Is(err, postgres.ErrHypertableUnavailable) {
 			log.Warn("continuing without TimescaleDB hypertable", "error", err)
 		} else {
@@ -65,17 +63,25 @@ func run(ctx context.Context, cfg config.Collector, log *slog.Logger) error {
 		log.Info("schema ready (TimescaleDB hypertable)")
 	}
 
-	consumer, err := kafkaqueue.New(kafkaqueue.Config{
-		Brokers: cfg.KafkaBrokers,
-		Topic:   cfg.KafkaTopic,
-		GroupID: cfg.KafkaGroupID,
-	})
-	if err != nil {
-		return err
+	var consumer queue.Consumer
+	if cfg.QueueType == "grpc" {
+		consumer, err = grpcqueue.NewConsumer(cfg.QueueAddr, cfg.KafkaTopic, cfg.KafkaGroupID)
+		if err != nil {
+			return err
+		}
+		log.Info("connected to gRPC queue", "addr", cfg.QueueAddr, "topic", cfg.KafkaTopic, "group", cfg.KafkaGroupID)
+	} else {
+		consumer, err = kafkaqueue.New(kafkaqueue.Config{
+			Brokers: cfg.KafkaBrokers,
+			Topic:   cfg.KafkaTopic,
+			GroupID: cfg.KafkaGroupID,
+		})
+		if err != nil {
+			return err
+		}
+		log.Info("joined kafka consumer group", "brokers", cfg.KafkaBrokers, "topic", cfg.KafkaTopic, "group", cfg.KafkaGroupID)
 	}
 	defer func() { _ = consumer.Close() }()
-	log.Info("joined consumer group",
-		"brokers", cfg.KafkaBrokers, "topic", cfg.KafkaTopic, "group", cfg.KafkaGroupID)
 
 	coll := collector.New(consumer, st, collector.Config{
 		BatchSize:     cfg.BatchSize,
@@ -90,14 +96,9 @@ func run(ctx context.Context, cfg config.Collector, log *slog.Logger) error {
 		_ = healthSrv.Shutdown(shutdownCtx)
 	}()
 
-	// Run blocks until ctx is cancelled (SIGINT/SIGTERM), then drains and
-	// returns. The consumer/store deferred closes above complete the shutdown.
 	return coll.Run(ctx)
 }
 
-// startHealthServer exposes liveness (/healthz) and readiness (/readyz) probes
-// plus a lightweight stats endpoint, on a goroutine. Readiness reflects DB
-// connectivity so a replica that loses its database is taken out of rotation.
 func startHealthServer(addr string, st interface {
 	Ping(context.Context) error
 }, stats *collector.Stats, log *slog.Logger) *http.Server {

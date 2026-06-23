@@ -46,6 +46,7 @@ an auto-generated OpenAPI spec.
 cmd/api/main.go       API gateway entry point (graceful shutdown, slog logging)
 cmd/collector/main.go Telemetry Collector entry point (health server, shutdown)
 cmd/streamer/main.go  Telemetry Streamer entry point (health server, shutdown)
+cmd/queue/main.go     Custom gRPC Message Queue broker (Stateless MVP)
 internal/api/         REST API layer (Gin)
   handler.go            request handlers + OpenAPI annotations (presentation)
   router.go             routes, structured logging, Swagger UI route
@@ -53,10 +54,12 @@ internal/api/         REST API layer (Gin)
 internal/telemetry/   shared on-the-wire telemetry Record (producer <-> consumer)
 internal/queue/       queue.Consumer / queue.Producer abstractions (technology-agnostic)
   kafka/                Kafka implementation (segmentio/kafka-go: groups + producer)
+  grpc/                 Custom gRPC implementation (Client + API descriptors)
 internal/store/       store.TelemetryStore (write) + TelemetryReader (read) abstractions
   postgres/             PostgreSQL/TimescaleDB implementation (pgx)
 internal/collector/   the collector engine (batch -> persist -> commit)
 internal/streamer/    the streamer engine (CSV -> stamp -> publish)
+internal/queue/server/  The in-memory gRPC broker logic (storage, offsets, locking)
 internal/config/      env-driven configuration (API + Collector + Streamer)
 .dockerignore         build-context exclusions
 deploy/
@@ -64,6 +67,7 @@ deploy/
     Dockerfile.api        API image (multi-stage -> distroless static)
     Dockerfile.collector  Collector image (separate, so it scales independently)
     Dockerfile.streamer   Streamer image (separate, so it scales independently)
+    Dockerfile.queue     Queue image (custom gRPC broker, distroless static)
   namespace.yaml        dedicated, security-hardened namespace (restricted PSA)
   streamer-data-pvc.yaml      PVC holding the telemetry CSV (loaded at runtime)
   streamer-data-loader.yaml   helper pod used to copy the CSV onto the PVC
@@ -71,6 +75,7 @@ deploy/
   helm/gpu-telemetry-api/        API Helm chart
   helm/gpu-telemetry-collector/  Collector Helm chart (Deployment + HPA + NetPol)
   helm/gpu-telemetry-streamer/   Streamer Helm chart (Deployment + HPA + NetPol)
+  helm/gpu-telemetry-queue/      Custom gRPC Queue Helm chart (Deployment + Service)
   helm/kafka/                    Single-node Kafka StatefulSet (KRaft, cp-kafka:7.6.0, no Zookeeper)
   helm/timescaledb/              TimescaleDB Helm values (bitnami/postgresql + db-init Job)
 Makefile              build / test / coverage / deploy targets (see "Make targets")
@@ -91,17 +96,16 @@ README.md             this file
 - **HTTP/REST:** [Gin](https://github.com/gin-gonic/gin)
 - **OpenAPI:** [swaggo/swag](https://github.com/swaggo/swag) + gin-swagger (spec
   generated from handler annotations)
-- **Message queue:** [Kafka](https://kafka.apache.org/) via the pure-Go
-  [segmentio/kafka-go](https://github.com/segmentio/kafka-go) client (behind
-  `queue.Consumer` / `queue.Producer` interfaces — see the message-queue note
-  above)
+- **Message queue:** 
+    - [Kafka](https://kafka.apache.org/) via the pure-Go [segmentio/kafka-go](https://github.com/segmentio/kafka-go) client.
+    - **Custom gRPC Queue** (MVP) utilizing `google.golang.org/grpc` for high-performance binary streaming.
+    - Both are behind `queue.Consumer` / `queue.Producer` interfaces.
 - **Persistence:** [PostgreSQL](https://www.postgresql.org/) +
   [TimescaleDB](https://www.timescale.com/) via the pure-Go
   [pgx](https://github.com/jackc/pgx) driver (behind `store.TelemetryStore`
   write and `store.TelemetryReader` read interfaces)
 - **Container:** multi-stage Docker build on a `distroless/static:nonroot` base
-  (`CGO_ENABLED=0`) — which is why both the Kafka and Postgres clients are
-  pure-Go (no librdkafka / libpq)
+  (`CGO_ENABLED=0`)
 - **Orchestration:** Kubernetes via [minikube](https://minikube.sigs.k8s.io/),
   packaged with [Helm](https://helm.sh/), [Calico](https://www.tigera.io/project-calico/)
   CNI for NetworkPolicy enforcement
@@ -135,28 +139,24 @@ the pipeline. Each instance:
   is a drop-in replacement.
 - **`internal/queue/kafka`** — the Kafka implementation (consumer groups, manual
   offset commits) using the pure-Go `segmentio/kafka-go`.
+- **`internal/queue/grpc`** — the custom gRPC implementation for the custom queue.
 - **`internal/store`** + **`internal/store/postgres`** — the `TelemetryStore`
   interface and its TimescaleDB implementation.
-- **`internal/collector`** — the engine: a single consume→batch→persist→commit
+- **`internal/collector`** — the engine: a single consume$\rightarrow$batch$\rightarrow$persist$\rightarrow$commit
   loop per instance, kept simple so at-least-once semantics are easy to reason
   about.
 
 ### Dynamic scaling (the headline requirement)
 
 Scaling is **horizontal and configuration-free**: every replica joins the same
-Kafka consumer group (`KAFKA_GROUP_ID`), and Kafka distributes the topic's
-partitions across the live members, rebalancing automatically as replicas are
+consumer group (`KAFKA_GROUP_ID` for Kafka, `groupID` for gRPC), and the queue
+distributes the load across the live members, rebalancing automatically as replicas are
 added or removed. To scale:
 
 - **Kubernetes:** the [collector Helm chart](deploy/helm/gpu-telemetry-collector/)
   ships a `HorizontalPodAutoscaler` (default 1–10 replicas on CPU). Or scale
   manually: `kubectl -n gpu-telemetry scale deploy/<release>-gpu-telemetry-collector --replicas=N`.
 - **Compose:** `docker compose -f deploy/docker-compose.yaml up --scale collector=3`.
-
-> **Provision enough partitions.** Effective parallelism is capped by the topic's
-> partition count — replicas beyond the number of partitions sit idle. The dev
-> stack and the brief's 10-instance cap assume **≥ 10 partitions** (the compose
-> `kafka-init` creates the topic with 10).
 
 ### Delivery semantics
 
@@ -179,7 +179,9 @@ the pipeline stays runnable.
 
 | Variable | Default | Description |
 |---|---|---|
-| `KAFKA_BROKERS` | `localhost:9092` | Comma-separated broker list. |
+| `QUEUE_TYPE` | `kafka` | Type of queue implementation (`kafka` or `grpc`). |
+| `QUEUE_ADDR` | `localhost:50051` | Address of the gRPC queue service. |
+| `KAFKA_BROKERS` | `localhost:9092` | Comma-separated broker list (used if `QUEUE_TYPE=kafka`). |
 | `KAFKA_TOPIC` | `gpu-telemetry` | Topic to consume. |
 | `KAFKA_GROUP_ID` | `telemetry-collectors` | Consumer group (shared by all replicas). |
 | `POSTGRES_DSN` | `postgres://telemetry:telemetry@localhost:5432/telemetry?sslmode=disable` | TimescaleDB connection string. |
@@ -214,8 +216,8 @@ throughput.
 ```bash
 make deploy-collector \
   COLLECTOR_CHART_DIR=deploy/helm/gpu-telemetry-collector
-# point it at your Kafka/TimescaleDB via --set or a values file, e.g.:
-#   --set kafka.brokers=kafka:9092 --set postgres.dsn=...
+# point it at your Queue/Kafka/TimescaleDB via --set or a values file, e.g.:
+#   --set queue.type=grpc --set queue.addr=gpu-telemetry-queue:50051
 minikube addons enable metrics-server   # required for the HPA
 ```
 
@@ -238,7 +240,7 @@ and provisioned independently.
 Each message is keyed by **GPU UUID**, so a given GPU's datapoints hash to one
 partition and stay ordered end-to-end. The Streamer programs against the
 `queue.Producer` interface; **Kafka is the first implementation**, swappable for
-the custom queue later.
+the custom gRPC queue later.
 
 ### Dynamic scaling (the headline requirement)
 
@@ -260,7 +262,9 @@ keep pace.
 
 | Variable | Default | Description |
 |---|---|---|
-| `KAFKA_BROKERS` | `localhost:9092` | Comma-separated broker list. |
+| `QUEUE_TYPE` | `kafka` | Type of queue implementation (`kafka` or `grpc`). |
+| `QUEUE_ADDR` | `localhost:50051` | Address of the gRPC queue service. |
+| `KAFKA_BROKERS` | `localhost:9092` | Comma-separated broker list (used if `QUEUE_TYPE=kafka`). |
 | `KAFKA_TOPIC` | `gpu-telemetry` | Topic to publish to. |
 | `STREAMER_CSV_PATH` | *(required)* | Telemetry source file, read at runtime (a PV mount in k8s). |
 | `STREAMER_INTERVAL` | `10ms` | Per-replica delay between datapoints. |
@@ -279,8 +283,8 @@ counters: `streamed`, `publish_errors`, `loops`) on `STREAMER_HEALTH_ADDR`.
 
 ```bash
 make deploy-streamer
-# point it at your Kafka via --set or a values file, e.g.:
-#   --set kafka.brokers=kafka:9092 --set streamer.interval=5ms
+# point it at your Queue/Kafka via --set or a values file, e.g.:
+#   --set queue.type=grpc --set queue.addr=gpu-telemetry-queue:50051
 minikube addons enable metrics-server   # required for the HPA
 ```
 
@@ -291,7 +295,7 @@ present, so you can also load it independently with `make load-streamer-data`.
 
 The API ([`internal/api`](internal/api/), entrypoint [`cmd/api`](cmd/api/main.go))
 reads telemetry from the same TimescaleDB the Collector writes to. It is layered
-**handlers → service → store**: the handlers
+**handlers $\rightarrow$ service $\rightarrow$ store**: the handlers
 ([`handler.go`](internal/api/handler.go)) decode HTTP and map errors to status
 codes; a [`service`](internal/api/service/) layer (bundled with the API only)
 holds the business logic — input validation, query-limit defaulting/clamping,
@@ -342,8 +346,8 @@ of truth), rather than maintained by hand:
 make openapi
 ```
 
-The Swagger UI is wired into the router and served at `/swagger/index.html`,
-with the raw spec at `/swagger/doc.json`.
+The Swagger UI is wired into the router and served at `/swagger/index.html`S (raw
+spec at `/swagger/doc.json`).
 
 ## Reference data
 
@@ -364,21 +368,21 @@ go build ./...
 
 The Dockerfiles live under [`deploy/build/`](deploy/build/), one per service.
 Each is multi-stage: it builds a statically-linked binary (`CGO_ENABLED=0`,
-stripped) in a `golang` stage and copies it into a
-`gcr.io/distroless/static-debian12:nonroot` runtime stage — no shell, no package
-manager, runs as a non-root user (uid `65532`). The result is a small,
-low-attack-surface image. The build context is the repo root (where the Go
-module lives), selected with `-f`:
+stripped) and copies it into a `gcr.io/distroless/static-debian12:nonroot` runtime
+stage — no shell, no package manager, runs as a non-root user (uid `65532`).
+The result is a small, low-attack-surface image. The build context is the repo root
+(where the Go module lives), selected with `-f`:
 
 ```bash
 make docker-build            # -f deploy/build/Dockerfile.api       -> gpu-telemetry-api:0.1.0
 make docker-build-collector  # -f deploy/build/Dockerfile.collector -> gpu-telemetry-collector:0.1.0
-make docker-build-streamer   # -f deploy/build/Dockerfile.streamer  -> gpu-telemetry-streamer:0.1.0
+make docker-build-streamer   # -f deploy/build/Dockerfile.streamer -> gpu-telemetry-streamer:0.1.0
+make docker-build-queue       # -f deploy/build/Dockerfile.queue   -> gpu-telemetry-queue:0.1.0
 ```
 
 The Dockerfile paths are overridable (`API_DOCKERFILE`, `COLLECTOR_DOCKERFILE`,
-`STREAMER_DOCKERFILE`), as are the image names and tag (`IMAGE`,
-`COLLECTOR_IMAGE`, `STREAMER_IMAGE`, `TAG`).
+`STREAMER_DOCKERFILE`, `QUEUE_DOCKERFILE`), as are the image names and tag (`IMAGE`,
+`COLLECTOR_IMAGE`, `STREAMER_IMAGE`, `QUEUE_IMAGE`, `TAG`).
 
 ## Deploy to minikube (Helm)
 
@@ -415,16 +419,8 @@ This runs, in order:
    extension. The Job uses the application user (`telemetry`) rather than the
    Postgres superuser, because the superuser password in the Bitnami secret drifts
    when the PVC is reused across Helm releases.
-4. `make deploy-kafka` — applies [`kafka-statefulset.yaml`](deploy/helm/kafka/kafka-statefulset.yaml),
-   a minimal single-node Kafka broker running in **KRaft mode** (no Zookeeper).
-   `enableServiceLinks: false` prevents Kubernetes from injecting `KAFKA_PORT` into
-   the pod, which the cp-kafka entrypoint otherwise treats as a deprecated config key.
-   `KAFKA_ADVERTISED_LISTENERS` is set to the ClusterIP Service (`kafka:9092`) rather
-   than the headless-pod FQDN, so clients always resolve a stable address regardless
-   of pod identity. A `kafka-allow` NetworkPolicy is co-applied with the StatefulSet
-   because the namespace carries a default-deny policy (deployed by the API chart);
-   without it, Calico silently drops every connection to the broker — including the
-   KRaft controller port (9093) the broker uses to contact itself.
+4. `make deploy-queue` — builds + loads the custom gRPC queue image and installs
+   the chart (`deploy/helm/gpu-telemetry-queue`).
 5. `make deploy-collector` — builds + loads the Collector image, then installs
    the Collector chart (Deployment + HPA).
 6. `make deploy-streamer` — provisions the data PVC, copies the CSV onto it,
@@ -457,11 +453,9 @@ The deployment is hardened by default:
   namespace-wide default-deny (`podSelector: {}`, Ingress + Egress), then each
   component ships an explicit allow policy. DNS egress is permitted everywhere;
   the API adds Postgres egress, in-namespace HTTP, and external ingress to its
-  port; the Collector adds Kafka/Postgres egress and health ingress; the Streamer
-  adds Kafka egress and health ingress; and Kafka itself has a `kafka-allow`
-  policy that opens broker port 9092 to all namespace pods, controller port 9093
-  for KRaft self-coordination, and DNS egress — without which Calico silently
-  drops every connection to the broker.
+  port; the Collector adds Queue/Kafka/Postgres egress and health ingress; the Streamer
+  adds Queue/Kafka egress and health ingress; and the Queue service has an explicit
+  allow rule for its gRPC port.
 
 ## Accessing the service
 
@@ -481,8 +475,8 @@ make service-url      # prints http://127.0.0.1:<port>
 
 Once reachable, the **Swagger UI** is at `/swagger/index.html` (raw spec at
 `/swagger/doc.json`) — e.g. `http://$(minikube ip):30080/swagger/index.html`
-from WSL. Swagger's "Try it out" calls the same origin that served the page, so
-no extra configuration is needed.
+from WSL. Swagger's "Try it out" calls the same origin that served the page,
+so no extra configuration is needed.
 
 > The tunnel binds `127.0.0.1`, so it reaches the Windows host but not other
 > machines on the LAN. For LAN access, use a `LoadBalancer` service +
@@ -501,18 +495,18 @@ no extra configuration is needed.
 | `make minikube-load` | Build, then load the image into minikube. |
 | `make namespace` | Create + label the hardened `gpu-telemetry` namespace. |
 | `make helm-lint` / `make helm-template` | Lint / render the API chart. |
-| `make deploy` | Full pipeline: TimescaleDB → Kafka → Collector → Streamer → API (build, load, and install all charts). |
-| `make deploy-timescaledb` | Deploy TimescaleDB (bitnami/postgresql chart + db-init Job to create the database and extension). |
-| `make deploy-kafka` | Deploy single-node Kafka in KRaft mode (StatefulSet, no Zookeeper). |
+| `make deploy` | Full pipeline: TimescaleDB $\rightarrow$ Queue $\rightarrow$ Collector $\rightarrow$ Streamer $\rightarrow$ API. |
+| `make deploy-timescaledb` | Deploy TimescaleDB (bitnami/postgresql chart + db-init Job). |
+| `make deploy-queue` | Build $\rightarrow$ load $\rightarrow$ install the custom gRPC queue chart. |
 | `make docker-build-collector` | Build the collector image `gpu-telemetry-collector:0.1.0`. |
-| `make deploy-collector` | Build → load → install the collector chart (Deployment + HPA). |
+| `make deploy-collector` | Build $\rightarrow$ load $\rightarrow$ install the collector chart. |
 | `make undeploy-collector` | Uninstall the collector release. |
 | `make docker-build-streamer` | Build the streamer image `gpu-telemetry-streamer:0.1.0`. |
 | `make load-streamer-data` | Provision the data PVC and copy the CSV onto it. |
-| `make deploy-streamer` | Load data → build → load → install the streamer chart (Deployment + HPA). |
+| `make deploy-streamer` | Load data $\rightarrow$ build $\rightarrow$ load $\rightarrow$ install the streamer chart. |
 | `make undeploy-streamer` | Uninstall the streamer release. |
-| `make deploy-api` | Build → load API image → install the API Helm chart (Deployment + Service + NetworkPolicy). |
-| `make undeploy-api` | Uninstall the API Helm release (leaves the namespace intact). |
+| `make deploy-api` | Build $\rightarrow$ load API image $\rightarrow$ install the API Helm chart. |
+| `make undeploy-api` | Uninstall the API Helm release. |
 | `make status` | Show workloads + security objects in the namespace. |
 | `make service-url` / `make expose` | Print URL / open a tunnel for host access. |
 | `make undeploy` | Uninstall the API release and delete the namespace. |
@@ -524,7 +518,7 @@ no extra configuration is needed.
 ## Roadmap
 
 Done:
-
+- ✅ **Custom gRPC Message Queue (Stage 1 MVP)** — Stateless in-memory broker implementing the `queue` interfaces, deployed via Helm.
 - ✅ **Containerisation and Kubernetes (minikube) deployment** via Helm, with a
   security-hardened, dedicated namespace.
 - ✅ **Telemetry Streamer** — scalable CSV replayer that publishes to the queue,
@@ -536,20 +530,15 @@ Done:
   (write) and `TelemetryReader` (read) interfaces.
 - ✅ **REST API** — reads telemetry back from TimescaleDB (`GET /api/v1/gpus`,
   `GET /api/v1/gpus/{id}/telemetry`), with OpenAPI/Swagger.
-- ✅ **End-to-end pipeline** — Streamer → Kafka → Collector → TimescaleDB → API,
+- ✅ **End-to-end pipeline** — Streamer $\rightarrow$ Queue $\rightarrow$ Collector $\rightarrow$ TimescaleDB $\rightarrow$ API,
   demonstrable via Docker Compose and on minikube.
 - ✅ **Unit tests + coverage** via the Makefile (`make cover`).
 
 The following is the remaining project goal:
-
-- A **custom message queue** (competing-consumers work queue) replacing Kafka.
-  The Streamer and Collector already target `queue.Producer` / `queue.Consumer`
-  interfaces, so this is a drop-in implementation rather than a rewrite. The
-  architecture — stateless gRPC broker, phased implementation plan, smart flush
-  algorithm, and peer replication — is specified in [QUEUE.md](QUEUE.md).
+- **Stage 2+ Custom Queue**: Implement shared persistence (e.g. S3/EFS), smart flushing, and peer replication for high availability.
 
 ## AI assistance
 
 This repository's initial structure was scaffolded with Claude Code. A detailed
 account of the prompts used and where AI needed manual intervention is in
-[project_docs/AI_PROMPTS.md](project_docs/AI_PROMPTS.md).
+[`project_docs/AI_PROMPTS.md`](project_docs/AI_PROMPTS.md).

@@ -26,9 +26,9 @@ func APIConfig() API {
 // environment so the same binary runs unchanged across local dev, Docker
 // Compose, and Kubernetes (where Helm injects these as env vars).
 type Collector struct {
-	// Kafka consumer-group settings. Brokers is a comma-separated list. All
-	// replicas share GroupID to form one competing-consumers group, which is how
-	// scaling up/down redistributes partitions automatically.
+	// Queue settings. QueueType can be "kafka" or "grpc".
+	QueueType string
+	QueueAddr string
 	KafkaBrokers []string
 	KafkaTopic   string
 	KafkaGroupID string
@@ -48,6 +48,8 @@ type Collector struct {
 
 func CollectorConfig() Collector {
 	return Collector{
+		QueueType: getenv("QUEUE_TYPE", "kafka"),
+		QueueAddr: getenv("QUEUE_ADDR", "localhost:50051"),
 		KafkaBrokers: splitAndTrim(getenv("KAFKA_BROKERS", "localhost:9092")),
 		KafkaTopic:   getenv("KAFKA_TOPIC", "gpu-telemetry"),
 		KafkaGroupID: getenv("KAFKA_GROUP_ID", "telemetry-collectors"),
@@ -67,8 +69,9 @@ func CollectorConfig() Collector {
 // sourced from the environment so the same binary runs unchanged across local
 // dev, Docker Compose, and Kubernetes.
 type Streamer struct {
-	// Kafka producer settings. Brokers is a comma-separated list. The topic is
-	// the same one the Collector consumes from.
+	// Queue settings. QueueType can be "kafka" or "grpc".
+	QueueType string
+	QueueAddr string
 	KafkaBrokers []string
 	KafkaTopic   string
 
@@ -89,6 +92,8 @@ type Streamer struct {
 
 func StreamerConfig() Streamer {
 	return Streamer{
+		QueueType: getenv("QUEUE_TYPE", "kafka"),
+		QueueAddr: getenv("QUEUE_ADDR", "localhost:50051"),
 		KafkaBrokers: splitAndTrim(getenv("KAFKA_BROKERS", "localhost:9092")),
 		KafkaTopic:   getenv("KAFKA_TOPIC", "gpu-telemetry"),
 

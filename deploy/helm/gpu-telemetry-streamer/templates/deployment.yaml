@@ -44,10 +44,14 @@ spec:
           securityContext:
             {{- toYaml .Values.containerSecurityContext | nindent 12 }}
           env:
+            - name: QUEUE_TYPE
+              value: {{ .Values.queue.type | quote }}
+            - name: QUEUE_ADDR
+              value: {{ .Values.queue.addr | quote }}
             - name: KAFKA_BROKERS
-              value: {{ .Values.kafka.brokers | quote }}
+              value: {{ .Values.queue.kafka.brokers | quote }}
             - name: KAFKA_TOPIC
-              value: {{ .Values.kafka.topic | quote }}
+              value: {{ .Values.queue.kafka.topic | quote }}
             - name: STREAMER_CSV_PATH
               value: "{{ .Values.csv.mountPath }}/{{ .Values.csv.fileName }}"
             - name: STREAMER_INTERVAL
