@@ -42,6 +42,8 @@ csv:
 streamer:
   interval: "10ms"
   loop: true
+  # emptyDir mount; survives container restarts, resets on pod eviction.
+  checkpointDir: /checkpoint
 
 # Port the streamer serves liveness/readiness/stats on.
 healthPort: 8082

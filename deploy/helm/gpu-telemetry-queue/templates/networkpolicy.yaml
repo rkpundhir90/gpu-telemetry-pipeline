@@ -1,6 +1,4 @@
-# 1) Default-deny is provided by the API chart's policy (podSelector: {} covers
-#    every pod in the namespace). This chart adds only the traffic the queue needs.
-# 2) Allow DNS resolution (egress to kube-dns in kube-system).
+# Default-deny is owned by the API chart. These policies add only what the queue needs.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -25,8 +23,6 @@ spec:
         - protocol: TCP
           port: 53
 ---
-# 3) Allow ingress on the gRPC port from other pods in the namespace
-#    (the Streamer produces and the Collector consumes via this port).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -46,3 +42,6 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.service.port }}
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.healthPort }}
