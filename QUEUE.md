@@ -96,6 +96,21 @@ baseOffset         HEAD
 [msg₁₀₀₀ … msg₁₂₄₉]   ← only these 250 messages are buffered
 ```
 
+### Notify channel (close + replace)
+
+`ConsumeBatch` blocks by waiting on a `notify chan struct{}` that is closed on every `Produce` and immediately replaced with a fresh channel. This lets the wait loop use a native `select`:
+
+```go
+select {
+case <-notifyCh:   // new messages arrived
+case <-ctx.Done(): // shutdown or timeout
+}
+```
+
+The previous design used `sync.Cond`, which cannot be combined with `select`. The workaround was a goroutine per `ConsumeBatch` call that called `cond.Broadcast()` when the context was cancelled — one extra goroutine per active consumer per batch. The notify channel eliminates this entirely.
+
+The close happens **after** the producer releases its mutex, so woken consumers can acquire the lock immediately rather than queueing behind the producer.
+
 ### Graceful shutdown
 
 The broker runs `grpc.Server.GracefulStop()` on `SIGTERM`, which lets in-flight RPCs complete before the listener closes. `terminationGracePeriodSeconds: 15` in the Helm chart gives enough time for consumers to drain their batch buffers and producers to finish their current retries.
@@ -162,38 +177,22 @@ The checkpoint file lives on an `emptyDir` volume (`/checkpoint/progress`). `emp
 
 The Helm chart sets `STREAMER_CHECKPOINT_DIR=/checkpoint` via `values.yaml → streamer.checkpointDir`.
 
-## Phased Implementation Plan
+## Implementation Status
 
-### Stage 1: In-Memory Broker ✅ Complete
+All features are complete and running end-to-end in minikube (`publish_errors: 0`, `total_dropped: 0`).
 
-- Pure in-memory topic storage with `sync.RWMutex` + `sync.Cond`
-- `Produce` / `StreamConsume` (server-streaming) / `Commit` RPCs
-- Bounded buffer with eviction and `baseOffset` tracking
-- Consumer reconnection with exponential backoff
-- Producer retry with backoff
-- HTTP health endpoint (`/healthz`, `/readyz`, `/stats`)
-- Graceful shutdown on SIGTERM
-- TLS support (self-signed CA for minikube)
-- Streamer CSV checkpoint (emptyDir, survives container restarts)
-- **Status:** Running end-to-end in minikube. `publish_errors: 0`, `total_dropped: 0`.
-
-### Stage 2: Shared Persistence & Smart Flushing
-
-- Durability without local state.
-- Background worker flushes in-memory buffers to shared storage (S3-compatible / EFS).
-- Flush triggered by: size threshold (5 MB), time threshold (200ms), or memory pressure.
-- Queue Mode: messages acknowledged before the flush window are evicted and never written to disk.
-
-### Stage 3: Consumer Groups & State
-
-- Multiple microservices reading cooperatively from the same topic.
-- Internal `__consumer_offsets` topic for durable offset tracking across pod restarts.
-
-### Stage 4: High Availability & Clustering
-
-- Horizontal scaling across 10+ broker instances.
-- In-memory peer replication (memory quorum): leader forwards batch to follower before ACKing producer.
-- Lightweight Metadata Raft cluster for partition leadership.
+| Feature | Detail |
+|---------|--------|
+| gRPC transport | Hand-written bindings — no protoc dependency |
+| Server-streaming delivery | Broker pushes batches; ~500k msg/s vs ~1k for unary |
+| Bounded buffer | Per-topic cap; oldest quarter evicted, lagging consumers reset |
+| Notify channel | `close`+replace on every Produce — no goroutine per consumer call |
+| Consumer reconnection | Exponential backoff (100ms → 10s), `waitForReady: true` |
+| Producer retry | Up to 5 retries with backoff on transient errors |
+| Graceful shutdown | `GracefulStop()` on SIGTERM, 15s termination grace period |
+| Health endpoint | `/healthz`, `/readyz`, `/stats` on `:8083` |
+| TLS | Self-signed CA via `make gen-tls-certs`; insecure for local dev |
+| Streamer checkpoint | emptyDir-backed progress file; survives container restarts |
 
 ## Getting Started
 

@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"fmt"
 	"sync"
 )
 
@@ -20,31 +19,32 @@ type TopicStats struct {
 
 // Topic is a bounded append-only in-memory log. When full the oldest quarter is
 // evicted; lagging consumers are silently reset to the new base rather than erroring.
+//
+// Blocking consumers wait on a notify channel that is closed on every Produce and
+// immediately replaced. This lets ConsumeBatch select on ctx.Done() natively,
+// removing the per-call goroutine that was needed with sync.Cond.
 type Topic struct {
-	mu               sync.RWMutex
+	mu               sync.Mutex
 	messages         []Message
 	baseOffset       int64 // logical offset of messages[0]
 	maxMessages      int
 	committedOffsets map[string]int64
 	deliveredOffsets map[string]int64
-	cond             *sync.Cond // signals waiting consumers when new messages arrive
+	notify           chan struct{} // closed on each Produce, replaced atomically
 }
 
 func newTopic(maxMessages int) *Topic {
-	t := &Topic{
+	return &Topic{
 		messages:         make([]Message, 0, maxMessages),
 		maxMessages:      maxMessages,
 		committedOffsets: make(map[string]int64),
 		deliveredOffsets: make(map[string]int64),
+		notify:           make(chan struct{}),
 	}
-	t.cond = sync.NewCond(&t.mu)
-	return t
 }
 
 func (t *Topic) Produce(msgs []Message) []int64 {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-
 	offsets := make([]int64, 0, len(msgs))
 	for _, m := range msgs {
 		offsets = append(offsets, t.baseOffset+int64(len(t.messages)))
@@ -58,34 +58,61 @@ func (t *Topic) Produce(msgs []Message) []int64 {
 		t.baseOffset += int64(evict)
 	}
 
-	t.cond.Broadcast() // wake consumers waiting for new data
+	// Capture and replace notify before unlocking so waiting consumers see the
+	// close only after the new channel is in place.
+	notify := t.notify
+	t.notify = make(chan struct{})
+	t.mu.Unlock()
+
+	// Close after unlock: woken consumers acquire the mutex immediately rather
+	// than queueing behind us.
+	close(notify)
 	return offsets
 }
 
-// Consume blocks until a message is available or wait returns false. Advances
-// lagging consumers to baseOffset rather than returning an error.
-func (t *Topic) Consume(groupID string, wait func() bool) (*Message, int64, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
+// ConsumeBatch blocks until at least one message is available or ctx is cancelled.
+// It loops with a lock-release-select-reacquire cycle so no goroutine is spawned
+// per call.
+func (t *Topic) ConsumeBatch(groupID string, maxBatch int, ctx context.Context) ([]BatchedMsg, error) {
+	for {
+		t.mu.Lock()
 
-	if t.deliveredOffsets[groupID] < t.baseOffset {
-		t.deliveredOffsets[groupID] = t.baseOffset
+		// Advance a lagging consumer to the oldest buffered offset.
+		if t.deliveredOffsets[groupID] < t.baseOffset {
+			t.deliveredOffsets[groupID] = t.baseOffset
+		}
+
+		if ctx.Err() != nil {
+			t.mu.Unlock()
+			return nil, ctx.Err()
+		}
+
+		if t.deliveredOffsets[groupID] < t.baseOffset+int64(len(t.messages)) {
+			available := t.baseOffset + int64(len(t.messages)) - t.deliveredOffsets[groupID]
+			count := int(available)
+			if count > maxBatch {
+				count = maxBatch
+			}
+			batch := make([]BatchedMsg, count)
+			for i := range batch {
+				localIdx := t.deliveredOffsets[groupID] - t.baseOffset
+				batch[i] = BatchedMsg{Msg: t.messages[localIdx], Offset: t.deliveredOffsets[groupID]}
+				t.deliveredOffsets[groupID]++
+			}
+			t.mu.Unlock()
+			return batch, nil
+		}
+
+		// No messages yet — wait outside the lock so Produce can append.
+		notifyCh := t.notify
+		t.mu.Unlock()
+
+		select {
+		case <-notifyCh:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
-
-	for wait() && t.deliveredOffsets[groupID] >= t.baseOffset+int64(len(t.messages)) {
-		t.cond.Wait()
-	}
-
-	if t.deliveredOffsets[groupID] >= t.baseOffset+int64(len(t.messages)) {
-		return nil, 0, fmt.Errorf("no messages available")
-	}
-
-	localIdx := t.deliveredOffsets[groupID] - t.baseOffset
-	offset := t.deliveredOffsets[groupID]
-	msg := t.messages[localIdx]
-	t.deliveredOffsets[groupID]++
-
-	return &msg, offset, nil
 }
 
 func (t *Topic) Commit(groupID string, offset int64) error {
@@ -96,8 +123,8 @@ func (t *Topic) Commit(groupID string, offset int64) error {
 }
 
 func (t *Topic) stats() TopicStats {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	committed := make(map[string]int64, len(t.committedOffsets))
 	for g, o := range t.committedOffsets {
 		committed[g] = o
@@ -113,49 +140,6 @@ func (t *Topic) stats() TopicStats {
 type BatchedMsg struct {
 	Msg    Message
 	Offset int64
-}
-
-// ConsumeBatch blocks until at least one message is available or ctx is cancelled.
-func (t *Topic) ConsumeBatch(groupID string, maxBatch int, ctx context.Context) ([]BatchedMsg, error) {
-	// Unblock cond.Wait when ctx is cancelled so shutdown isn't delayed.
-	stop := make(chan struct{})
-	defer close(stop)
-	go func() {
-		select {
-		case <-ctx.Done():
-			t.cond.Broadcast()
-		case <-stop:
-		}
-	}()
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	if t.deliveredOffsets[groupID] < t.baseOffset {
-		t.deliveredOffsets[groupID] = t.baseOffset
-	}
-
-	for ctx.Err() == nil && t.deliveredOffsets[groupID] >= t.baseOffset+int64(len(t.messages)) {
-		t.cond.Wait()
-	}
-
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-
-	available := t.baseOffset + int64(len(t.messages)) - t.deliveredOffsets[groupID]
-	count := int(available)
-	if count > maxBatch {
-		count = maxBatch
-	}
-
-	batch := make([]BatchedMsg, count)
-	for i := range batch {
-		localIdx := t.deliveredOffsets[groupID] - t.baseOffset
-		batch[i] = BatchedMsg{Msg: t.messages[localIdx], Offset: t.deliveredOffsets[groupID]}
-		t.deliveredOffsets[groupID]++
-	}
-	return batch, nil
 }
 
 type BrokerStats struct {
@@ -200,3 +184,4 @@ func (b *Broker) Stats() BrokerStats {
 	}
 	return stats
 }
+

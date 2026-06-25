@@ -1,8 +1,17 @@
 package server
 
 import (
+	"context"
 	"testing"
 )
+
+func consumeOne(t *Topic, groupID string) (BatchedMsg, error) {
+	batch, err := t.ConsumeBatch(groupID, 1, context.Background())
+	if err != nil {
+		return BatchedMsg{}, err
+	}
+	return batch[0], nil
+}
 
 func msgs(n int) []Message {
 	out := make([]Message, n)
@@ -11,8 +20,6 @@ func msgs(n int) []Message {
 	}
 	return out
 }
-
-func noWait() bool { return false }
 
 func TestBoundedBuffer_EvictsOldest(t *testing.T) {
 	topic := newTopic(8)
@@ -36,14 +43,13 @@ func TestBoundedBuffer_ConsumerReset(t *testing.T) {
 	// A consumer whose offset is behind the eviction window should be reset.
 	topic.deliveredOffsets["g"] = 1
 
-	msg, off, err := topic.Consume("g", noWait)
+	got, err := consumeOne(topic, "g")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if off != topic.baseOffset {
-		t.Fatalf("offset after reset = %d, want %d (baseOffset)", off, topic.baseOffset)
+	if got.Offset != topic.baseOffset {
+		t.Fatalf("offset after reset = %d, want %d (baseOffset)", got.Offset, topic.baseOffset)
 	}
-	_ = msg
 }
 
 func TestBoundedBuffer_OffsetContinuity(t *testing.T) {
@@ -57,12 +63,12 @@ func TestBoundedBuffer_OffsetContinuity(t *testing.T) {
 	// Consumer starts from offset 2 (still valid)
 	topic.deliveredOffsets["g"] = 2
 
-	_, off, err := topic.Consume("g", noWait)
+	got, err := consumeOne(topic, "g")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if off != 2 {
-		t.Fatalf("got offset %d, want 2", off)
+	if got.Offset != 2 {
+		t.Fatalf("got offset %d, want 2", got.Offset)
 	}
 }
 
