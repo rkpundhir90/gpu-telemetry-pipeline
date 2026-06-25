@@ -1,18 +1,12 @@
-{{ include "app.name" . }} deployed to namespace "{{ .Release.Namespace }}".
+{{ include "gpu-telemetry-queue.name" . }} deployed to namespace "{{ .Release.Namespace }}".
 
-Listen address: {{ .Values.listenAddr | default ":50051" }}
-Service:        {{ include "app.fullname" . }}:50051 (ClusterIP)
-Pod Security:   restricted (Pod Security Admission)
-NetworkPolicy:  {{ if .Values.networkPolicy.enabled }}DNS egress + gRPC ingress (port 50051) from namespace{{ else }}disabled{{ end }}
+Service:      {{ include "gpu-telemetry-queue.fullname" . }}:50051 (ClusterIP)
+Pod Security: restricted (Pod Security Admission)
+TLS:          {{ if .Values.tls.secretName }}enabled (secret: {{ .Values.tls.secretName }}){{ else }}disabled{{ end }}
 
-The queue exposes no HTTP health endpoint — liveness is determined by gRPC
-connectivity. Producers and consumers address it as:
+Producers and consumers address the queue as:
 
-  {{ include "app.fullname" . }}:50051
+  {{ include "gpu-telemetry-queue.fullname" . }}:50051
 
-To inspect in-flight state, check the queue pod logs:
-  kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/name={{ include "app.name" . }} --tail=50
-
-To test connectivity from another pod in the namespace (requires grpcurl):
-  kubectl -n {{ .Release.Namespace }} run grpcurl-test --rm -it --image=fullstorydev/grpcurl -- \
-    -plaintext {{ include "app.fullname" . }}:50051 list
+To inspect in-flight state:
+  kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/name={{ include "gpu-telemetry-queue.name" . }} --tail=50

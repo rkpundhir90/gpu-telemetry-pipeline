@@ -12,6 +12,12 @@ service:
 env:
   QUEUE_LISTEN_ADDR: ":50051"
 
+# TLS for the gRPC server. The secret must contain tls.crt and tls.key.
+# Create it with: make gen-tls-certs
+# Leave secretName empty to run without TLS (local dev only).
+tls:
+  secretName: gpu-telemetry-queue-tls
+
 resources:
   limits:
     cpu: 100m

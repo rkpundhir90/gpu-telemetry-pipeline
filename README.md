@@ -21,7 +21,18 @@ an auto-generated OpenAPI spec.
 > kept for comparison and compose-stack testing. The design and phased roadmap for
 > the custom queue are in [QUEUE.md](QUEUE.md).
 
+## Quick start
+
+```bash
+make setup-infra          # start cluster (Calico CNI)
+make deploy               # build + deploy full pipeline
+make service-url          # print the API URL (keep running for Windows access)
+```
+
+Swagger UI: `http://$(minikube ip):30080/swagger/index.html`
+
 ## Table of contents
+- [Quick start](#quick-start)
 - [What's in the repo today](#whats-in-the-repo-today)
 - [Tech stack (today)](#tech-stack-today)
 - [Telemetry Collector](#telemetry-collector)

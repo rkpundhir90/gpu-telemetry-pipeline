@@ -5,6 +5,15 @@ auth:
   password: telemetry
   database: telemetry
 
+# TLS for in-cluster connections. The secret must exist before this chart is
+# installed; create it with: make gen-postgres-tls-certs
+tls:
+  enabled: true
+  certificatesSecret: timescaledb-tls
+  certFilename: tls.crt
+  certKeyFilename: tls.key
+  preferServerCiphers: true
+
 # Load timescaledb as a shared_preload_library so the extension can be created
 postgresqlSharedPreloadLibraries: "timescaledb"
 
@@ -15,6 +24,13 @@ primary:
       create_timescale.sql: |
         -- Create TimescaleDB extension in the telemetry database
         CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
+  # The Bitnami TLS env vars (POSTGRESQL_ENABLE_TLS) only work with the Bitnami
+  # PostgreSQL image. The timescale/timescaledb image uses vanilla PG startup
+  # scripts that don't interpret them, so we inject ssl settings directly.
+  extendedConfiguration: |
+    ssl = on
+    ssl_cert_file = '/opt/bitnami/postgresql/certs/tls.crt'
+    ssl_key_file  = '/opt/bitnami/postgresql/certs/tls.key'
   # Add emptyDir volume for /var/run/postgresql (needed for socket file)
   podSecurityContext:
     enabled: true

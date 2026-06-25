@@ -43,6 +43,18 @@ for i in $(seq 1 $attempts); do
        --wait --timeout 180s --atomic; then
     echo "Helm deploy succeeded"
 
+    # The timescale/timescaledb image does not run the Bitnami startup scripts
+    # that normally add "include_dir" to postgresql.conf. Without it the
+    # override.conf (which sets ssl = on) is never loaded. Append the directive
+    # once; the line is idempotent — grep guards against duplicates.
+    PG_POD=$(kubectl get pod -n "$NAMESPACE" -l app.kubernetes.io/name=postgresql -o jsonpath='{.items[0].metadata.name}')
+    echo "Ensuring include_dir is set in postgresql.conf (pod: $PG_POD)..."
+    kubectl exec -n "$NAMESPACE" "$PG_POD" -- bash -c "
+      grep -qF \"include_dir = '/bitnami/postgresql/conf/conf.d'\" /bitnami/postgresql/data/postgresql.conf \
+        || echo \"include_dir = '/bitnami/postgresql/conf/conf.d'\" >> /bitnami/postgresql/data/postgresql.conf
+      pg_ctl reload -D /bitnami/postgresql/data -s
+    "
+
     echo "Running db-init Job to ensure database and extension exist..."
     # Delete any previous run so kubectl wait has a clean job to watch.
     kubectl delete job timescaledb-db-init -n "$NAMESPACE" --ignore-not-found

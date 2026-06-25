@@ -138,7 +138,7 @@ STREAMER_CSV_NAME  ?= dcgm_metrics.csv
 .PHONY: docker-build-collector minikube-load-collector deploy-collector undeploy-collector
 .PHONY: docker-build-streamer minikube-load-streamer deploy-streamer undeploy-streamer load-streamer-data
 .PHONY: docker-build-queue minikube-load-queue deploy-queue undeploy-queue deploy-kafka undeploy-kafka
-.PHONY: deploy-broker undeploy-broker
+.PHONY: deploy-broker undeploy-broker gen-tls-certs
 .PHONY: deploy-api undeploy-api deploy-all undeploy-all
 
 # Dockerfiles live under deploy/build; the build context is the repo root (where
@@ -250,7 +250,46 @@ deploy-collector: minikube-load-collector namespace
 undeploy-collector:
 	-helm uninstall $(COLLECTOR_RELEASE) --namespace $(NAMESPACE)
 
-deploy-queue: minikube-load-queue namespace
+# Generate a self-signed CA and server TLS certificate for the gRPC queue, then
+# store them in two K8s Secrets:
+#   gpu-telemetry-queue-tls  — server cert + key (mounted by the queue pod only)
+#   gpu-telemetry-queue-ca   — CA cert (mounted by collector + streamer to verify the server)
+# Uses a temp directory under /tmp that is cleaned up on success.
+TLS_TMPDIR ?= /tmp/gpu-telemetry-tls-$(shell id -u)
+
+gen-tls-certs: namespace
+	@mkdir -p $(TLS_TMPDIR)
+	@echo "Generating TLS CA..."
+	openssl req -x509 -newkey rsa:4096 -days 3650 -nodes \
+		-keyout $(TLS_TMPDIR)/ca.key \
+		-out    $(TLS_TMPDIR)/ca.crt \
+		-subj   "/CN=gpu-telemetry-queue-ca"
+	@echo "Generating server key + CSR..."
+	openssl req -newkey rsa:4096 -nodes \
+		-keyout $(TLS_TMPDIR)/tls.key \
+		-out    $(TLS_TMPDIR)/tls.csr \
+		-subj   "/CN=gpu-telemetry-queue"
+	@echo "subjectAltName=DNS:gpu-telemetry-queue,DNS:gpu-telemetry-queue.$(NAMESPACE).svc.cluster.local,DNS:gpu-telemetry-queue.$(NAMESPACE).svc" \
+		> $(TLS_TMPDIR)/san.ext
+	@echo "Signing server cert with CA..."
+	openssl x509 -req -days 3650 \
+		-in      $(TLS_TMPDIR)/tls.csr \
+		-CA      $(TLS_TMPDIR)/ca.crt \
+		-CAkey   $(TLS_TMPDIR)/ca.key \
+		-CAcreateserial \
+		-out     $(TLS_TMPDIR)/tls.crt \
+		-extfile $(TLS_TMPDIR)/san.ext
+	@echo "Storing TLS secrets in namespace $(NAMESPACE)..."
+	kubectl -n $(NAMESPACE) create secret tls gpu-telemetry-queue-tls \
+		--cert=$(TLS_TMPDIR)/tls.crt --key=$(TLS_TMPDIR)/tls.key \
+		--dry-run=client -o yaml | kubectl apply -f -
+	kubectl -n $(NAMESPACE) create secret generic gpu-telemetry-queue-ca \
+		--from-file=ca.crt=$(TLS_TMPDIR)/ca.crt \
+		--dry-run=client -o yaml | kubectl apply -f -
+	@rm -rf $(TLS_TMPDIR)
+	@echo "✅ TLS certs generated and stored (gpu-telemetry-queue-tls, gpu-telemetry-queue-ca)"
+
+deploy-queue: minikube-load-queue namespace gen-tls-certs
 	helm lint $(QUEUE_CHART_DIR)
 	helm upgrade --install $(QUEUE_RELEASE) $(QUEUE_CHART_DIR) \
 		--namespace $(NAMESPACE) \
@@ -260,6 +299,7 @@ deploy-queue: minikube-load-queue namespace
 
 undeploy-queue:
 	-helm uninstall $(QUEUE_RELEASE) --namespace $(NAMESPACE)
+	-kubectl -n $(NAMESPACE) delete secret gpu-telemetry-queue-tls gpu-telemetry-queue-ca --ignore-not-found
 
 # Provision the streamer's data PVC and copy the CSV onto it, so the Streamer
 # reads it from a mounted volume at runtime. Uses a short-lived helper pod
@@ -299,6 +339,7 @@ undeploy:
 
 # Tear down the whole pipeline. Pass the same QUEUE_TYPE used at deploy time.
 undeploy-all: undeploy-streamer undeploy-collector undeploy-broker undeploy
+	-kubectl -n $(NAMESPACE) delete secret timescaledb-tls timescaledb-ca --ignore-not-found
 	@echo "✅ removed API + Collector + Streamer + $(QUEUE_TYPE) broker from namespace $(NAMESPACE)"
 
 # Test & coverage
@@ -324,9 +365,47 @@ TIMESCALE_IMAGE_TAG  ?= latest-pg15
 TIMESCALE_RELEASE    ?= timescaledb
 TIMESCALE_VALUES     ?= deploy/helm/timescaledb/values.yaml
 
-.PHONY: deploy-timescaledb
+.PHONY: deploy-timescaledb gen-postgres-tls-certs
 
-deploy-timescaledb:
+# Generate a self-signed CA and server TLS certificate for Postgres, then store
+# them in two K8s Secrets:
+#   timescaledb-tls  — server cert + key (mounted by the Postgres StatefulSet)
+#   timescaledb-ca   — CA cert (mounted by API, Collector, and db-init-job to verify the server)
+# The secret must exist before `helm upgrade --install` for the Bitnami chart.
+PG_TLS_TMPDIR ?= /tmp/gpu-telemetry-pg-tls-$(shell id -u)
+
+gen-postgres-tls-certs: namespace
+	@mkdir -p $(PG_TLS_TMPDIR)
+	@echo "Generating Postgres TLS CA..."
+	openssl req -x509 -newkey rsa:4096 -days 3650 -nodes \
+		-keyout $(PG_TLS_TMPDIR)/ca.key \
+		-out    $(PG_TLS_TMPDIR)/ca.crt \
+		-subj   "/CN=timescaledb-ca"
+	@echo "Generating Postgres server key + CSR..."
+	openssl req -newkey rsa:4096 -nodes \
+		-keyout $(PG_TLS_TMPDIR)/tls.key \
+		-out    $(PG_TLS_TMPDIR)/tls.csr \
+		-subj   "/CN=timescaledb-postgresql"
+	@echo "subjectAltName=DNS:timescaledb-postgresql,DNS:timescaledb-postgresql.$(NAMESPACE).svc.cluster.local,DNS:timescaledb-postgresql.$(NAMESPACE).svc" \
+		> $(PG_TLS_TMPDIR)/san.ext
+	@echo "Signing Postgres server cert..."
+	openssl x509 -req -days 3650 \
+		-in      $(PG_TLS_TMPDIR)/tls.csr \
+		-CA      $(PG_TLS_TMPDIR)/ca.crt \
+		-CAkey   $(PG_TLS_TMPDIR)/ca.key \
+		-CAcreateserial \
+		-out     $(PG_TLS_TMPDIR)/tls.crt \
+		-extfile $(PG_TLS_TMPDIR)/san.ext
+	kubectl -n $(NAMESPACE) create secret tls timescaledb-tls \
+		--cert=$(PG_TLS_TMPDIR)/tls.crt --key=$(PG_TLS_TMPDIR)/tls.key \
+		--dry-run=client -o yaml | kubectl apply -f -
+	kubectl -n $(NAMESPACE) create secret generic timescaledb-ca \
+		--from-file=ca.crt=$(PG_TLS_TMPDIR)/ca.crt \
+		--dry-run=client -o yaml | kubectl apply -f -
+	@rm -rf $(PG_TLS_TMPDIR)
+	@echo "✅ Postgres TLS certs stored (timescaledb-tls, timescaledb-ca)"
+
+deploy-timescaledb: gen-postgres-tls-certs
 	./deploy/helm/timescaledb/install.sh
 
 .PHONY: deploy-kafka undeploy-kafka

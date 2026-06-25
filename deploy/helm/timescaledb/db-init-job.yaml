@@ -43,6 +43,14 @@ spec:
                 secretKeyRef:
                   name: timescaledb-postgresql
                   key: password
+            - name: PGSSLMODE
+              value: "verify-ca"
+            - name: PGSSLROOTCERT
+              value: "/pg-tls/ca.crt"
+          volumeMounts:
+            - name: pg-tls
+              mountPath: /pg-tls
+              readOnly: true
           command:
             - /bin/sh
             - -c
@@ -59,3 +67,7 @@ spec:
               echo "==> Enabling TimescaleDB extension..."
               psql -d telemetry -c "CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;"
               echo "==> Done."
+      volumes:
+        - name: pg-tls
+          secret:
+            secretName: timescaledb-ca

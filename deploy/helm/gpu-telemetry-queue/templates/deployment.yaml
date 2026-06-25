@@ -34,8 +34,26 @@ spec:
           env:
             - name: QUEUE_LISTEN_ADDR
               value: {{ .Values.env.QUEUE_LISTEN_ADDR | quote }}
+            {{- if .Values.tls.secretName }}
+            - name: GRPC_TLS_CERT_FILE
+              value: /tls/tls.crt
+            - name: GRPC_TLS_KEY_FILE
+              value: /tls/tls.key
+            {{- end }}
           ports:
             - name: grpc
               containerPort: 50051
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          {{- if .Values.tls.secretName }}
+          volumeMounts:
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+          {{- end }}
+      {{- if .Values.tls.secretName }}
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ .Values.tls.secretName }}
+      {{- end }}
