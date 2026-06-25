@@ -30,7 +30,7 @@ an auto-generated OpenAPI spec.
 - [OpenAPI / Swagger](#openapi--swagger)
 - [Reference data](#reference-data)
 - [Build](#build)
-- [Container image](#container-image)
+- [Container images](#container-images)
 - [Deploy to minikube (Helm)](#deploy-to-minikube-helm)
 - [Security](#security)
 - [Accessing the service](#accessing-the-service)
@@ -559,4 +559,4 @@ Remaining:
 
 This repository's initial structure was scaffolded with Claude Code. A detailed
 account of the prompts used and where AI needed manual intervention is in
-[`project_docs/AI_PROMPTS.md`](project_docs/AI_PROMPTS.md).
+[`AI_PROMPTS.md`](AI_PROMPTS.md).
