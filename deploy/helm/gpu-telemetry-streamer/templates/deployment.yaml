@@ -60,6 +60,10 @@ spec:
               value: {{ .Values.streamer.loop | quote }}
             - name: STREAMER_HEALTH_ADDR
               value: ":{{ .Values.healthPort }}"
+            {{- if and (eq .Values.queue.type "grpc") .Values.tls.caSecretName }}
+            - name: GRPC_TLS_CA_FILE
+              value: /tls/ca.crt
+            {{- end }}
           ports:
             - name: health
               containerPort: {{ .Values.healthPort }}
@@ -91,9 +95,19 @@ spec:
             # readOnlyRootFilesystem is true, so give the process a writable /tmp.
             - name: tmp
               mountPath: /tmp
+            {{- if and (eq .Values.queue.type "grpc") .Values.tls.caSecretName }}
+            - name: queue-ca
+              mountPath: /tls
+              readOnly: true
+            {{- end }}
       volumes:
         - name: data
           persistentVolumeClaim:
             claimName: {{ .Values.csv.claimName }}
         - name: tmp
           emptyDir: {}
+        {{- if and (eq .Values.queue.type "grpc") .Values.tls.caSecretName }}
+        - name: queue-ca
+          secret:
+            secretName: {{ .Values.tls.caSecretName }}
+        {{- end }}

@@ -5,6 +5,15 @@ auth:
   password: telemetry
   database: telemetry
 
+# TLS for in-cluster connections. The secret must exist before this chart is
+# installed; create it with: make gen-postgres-tls-certs
+tls:
+  enabled: true
+  certificatesSecret: timescaledb-tls
+  certFilename: tls.crt
+  certKeyFilename: tls.key
+  preferServerCiphers: true
+
 # Load timescaledb as a shared_preload_library so the extension can be created
 postgresqlSharedPreloadLibraries: "timescaledb"
 

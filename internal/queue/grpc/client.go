@@ -2,12 +2,38 @@ package grpc
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
+	"os"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"gpu-telemetry-pipeline/internal/queue"
 )
+
+// tlsDialOption returns TLS credentials when GRPC_TLS_CA_FILE is set, or
+// insecure credentials for local dev without a cert. This means both sides
+// must be configured consistently — TLS server + TLS client, or neither.
+func tlsDialOption() (grpc.DialOption, error) {
+	caFile := os.Getenv("GRPC_TLS_CA_FILE")
+	if caFile == "" {
+		return grpc.WithTransportCredentials(insecure.NewCredentials()), nil
+	}
+	caCert, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, fmt.Errorf("grpc: read CA cert %q: %w", caFile, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caCert) {
+		return nil, fmt.Errorf("grpc: invalid CA cert in %q", caFile)
+	}
+	return grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{
+		RootCAs:    pool,
+		MinVersion: tls.VersionTLS13,
+	})), nil
+}
 
 type producer struct {
 	conn   *grpc.ClientConn
@@ -16,7 +42,11 @@ type producer struct {
 }
 
 func NewProducer(addr, topic string) (queue.Producer, error) {
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	opt, err := tlsDialOption()
+	if err != nil {
+		return nil, err
+	}
+	conn, err := grpc.NewClient(addr, opt)
 	if err != nil {
 		return nil, fmt.Errorf("grpc producer dial error: %w", err)
 	}
@@ -64,7 +94,11 @@ type consumer struct {
 }
 
 func NewConsumer(addr, topic, groupID string) (queue.Consumer, error) {
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	opt, err := tlsDialOption()
+	if err != nil {
+		return nil, err
+	}
+	conn, err := grpc.NewClient(addr, opt)
 	if err != nil {
 		return nil, fmt.Errorf("grpc consumer dial error: %w", err)
 	}
