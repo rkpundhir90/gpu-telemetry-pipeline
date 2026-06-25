@@ -124,8 +124,10 @@ QUEUE_IMAGE        ?= gpu-telemetry-queue
 QUEUE_RELEASE      ?= gpu-telemetry-queue
 QUEUE_CHART_DIR    ?= deploy/helm/gpu-telemetry-queue
 
-# Global Queue Configuration (used by Collector and Streamer)
-QUEUE_TYPE        ?= kafka
+# Queue implementation: "grpc" (custom in-memory broker) or "kafka".
+# Pass QUEUE_TYPE=kafka on the command line to switch; all deploy/undeploy
+# targets read this variable and act accordingly.
+QUEUE_TYPE        ?= grpc
 QUEUE_ADDR        ?= gpu-telemetry-queue:50051
 
 # Telemetry data loaded onto the streamer's PVC at runtime (not baked into the image).
@@ -135,7 +137,8 @@ STREAMER_CSV_NAME  ?= dcgm_metrics.csv
 .PHONY: docker-build minikube-load namespace helm-lint helm-template deploy undeploy status expose service-url
 .PHONY: docker-build-collector minikube-load-collector deploy-collector undeploy-collector
 .PHONY: docker-build-streamer minikube-load-streamer deploy-streamer undeploy-streamer load-streamer-data
-.PHONY: docker-build-queue minikube-load-queue deploy-queue undeploy-queue
+.PHONY: docker-build-queue minikube-load-queue deploy-queue undeploy-queue deploy-kafka undeploy-kafka
+.PHONY: deploy-broker undeploy-broker
 .PHONY: deploy-api undeploy-api deploy-all undeploy-all
 
 # Dockerfiles live under deploy/build; the build context is the repo root (where
@@ -200,9 +203,22 @@ deploy-api: minikube-load namespace
 undeploy-api:
 	-helm uninstall $(RELEASE) --namespace $(NAMESPACE)
 
-# Full deploy: TimescaleDB → Queue → Collector → Streamer → API.
-deploy: deploy-timescaledb deploy-queue deploy-collector deploy-streamer deploy-api
-	@echo "✅ Full pipeline deployed to namespace $(NAMESPACE). Run 'make service-url' to connect."
+# deploy-broker / undeploy-broker: select the right broker based on QUEUE_TYPE.
+# ifeq is evaluated at parse time; command-line variables (e.g. QUEUE_TYPE=kafka)
+# are visible at parse time, so `make deploy QUEUE_TYPE=kafka` resolves correctly.
+ifeq ($(QUEUE_TYPE),grpc)
+deploy-broker: deploy-queue
+undeploy-broker: undeploy-queue
+else
+deploy-broker: deploy-kafka
+undeploy-broker: undeploy-kafka
+endif
+
+# Full deploy: TimescaleDB → <broker> → Collector → Streamer → API.
+# Switch queue with: make deploy QUEUE_TYPE=grpc   (default)
+#                    make deploy QUEUE_TYPE=kafka
+deploy: deploy-timescaledb deploy-broker deploy-collector deploy-streamer deploy-api
+	@echo "✅ Full pipeline deployed (QUEUE_TYPE=$(QUEUE_TYPE)) to namespace $(NAMESPACE). Run 'make service-url' to connect."
 
 # Show what is running in the namespace, including the security posture.
 status:
@@ -281,9 +297,9 @@ undeploy:
 	-helm uninstall $(RELEASE) --namespace $(NAMESPACE)
 	-kubectl delete -f deploy/namespace.yaml
 
-# Tear down the whole pipeline: uninstall all releases, then delete the namespace.
-undeploy-all: undeploy-streamer undeploy-collector undeploy-queue undeploy
-	@echo "✅ removed API + Collector + Streamer + Queue from namespace $(NAMESPACE)"
+# Tear down the whole pipeline. Pass the same QUEUE_TYPE used at deploy time.
+undeploy-all: undeploy-streamer undeploy-collector undeploy-broker undeploy
+	@echo "✅ removed API + Collector + Streamer + $(QUEUE_TYPE) broker from namespace $(NAMESPACE)"
 
 # Test & coverage
 .PHONY: test cover cover-html
@@ -313,7 +329,10 @@ TIMESCALE_VALUES     ?= deploy/helm/timescaledb/values.yaml
 deploy-timescaledb:
 	./deploy/helm/timescaledb/install.sh
 
-.PHONY: deploy-kafka
+.PHONY: deploy-kafka undeploy-kafka
 
 deploy-kafka:
 	./deploy/helm/kafka/install.sh
+
+undeploy-kafka:
+	-kubectl delete -f deploy/helm/kafka/kafka-statefulset.yaml --ignore-not-found

@@ -24,7 +24,7 @@ autoscaling:
 
 # Application configuration (injected as env vars; see internal/config)
 queue:
-  type: "kafka" # "kafka" or "grpc"
+  type: "grpc" # "grpc" (custom broker) or "kafka"
   addr: "gpu-telemetry-queue:50051"
   kafka:
     brokers: "kafka:9092"
