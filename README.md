@@ -13,15 +13,13 @@ an auto-generated OpenAPI spec.
 > Helm deployments onto minikube. This README describes **what exists today** and
 > grows as the project does.
 
-> **A note on the message queue.** The brief's end goal is a *custom* message
-> queue (no Kafka/RabbitMQ). The Collector and Streamer are deliberately written
-> against small `queue.Consumer` / `queue.Producer` interfaces so the queue
-> technology is a swappable implementation detail. **Kafka is the first
-> implementation** (used for now); dropping in the custom queue later means adding
-> one more `Consumer`/`Producer` implementation, with no change to collector or
-> streamer logic. See [Telemetry Collector](#telemetry-collector) and
-> [Telemetry Streamer](#telemetry-streamer). The design of the custom gRPC-based
-> queue is documented in [QUEUE.md](QUEUE.md).
+> **Custom gRPC Message Queue (Stage 1 complete).** The Collector and Streamer
+> are written against small `queue.Consumer` / `queue.Producer` interfaces so the
+> queue is a swappable implementation detail. **The custom gRPC queue is the
+> primary implementation** (`QUEUE_TYPE=grpc`, enabled by default in the Helm
+> deploy). Kafka remains available as an alternative (`QUEUE_TYPE=kafka`) and is
+> kept for comparison and compose-stack testing. The design and phased roadmap for
+> the custom queue are in [QUEUE.md](QUEUE.md).
 
 ## Table of contents
 - [What's in the repo today](#whats-in-the-repo-today)
@@ -134,12 +132,12 @@ the pipeline. Each instance:
                                     └──────────────┘  DO NOTHING      └────────────┘
 ```
 
-- **`internal/queue`** — the `Consumer` interface. The Collector depends only on
-  this, never on Kafka directly, so the brief's eventual *custom* message queue
-  is a drop-in replacement.
+- **`internal/queue`** — the `Consumer`/`Producer` interfaces. The Collector and
+  Streamer depend only on these, never on a specific broker.
+- **`internal/queue/grpc`** — the custom gRPC queue implementation (primary, enabled
+  via `QUEUE_TYPE=grpc`; hand-written bindings, JSON codec override, in-memory broker).
 - **`internal/queue/kafka`** — the Kafka implementation (consumer groups, manual
   offset commits) using the pure-Go `segmentio/kafka-go`.
-- **`internal/queue/grpc`** — the custom gRPC implementation for the custom queue.
 - **`internal/store`** + **`internal/store/postgres`** — the `TelemetryStore`
   interface and its TimescaleDB implementation.
 - **`internal/collector`** — the engine: a single consume$\rightarrow$batch$\rightarrow$persist$\rightarrow$commit
@@ -239,8 +237,8 @@ and provisioned independently.
 
 Each message is keyed by **GPU UUID**, so a given GPU's datapoints hash to one
 partition and stay ordered end-to-end. The Streamer programs against the
-`queue.Producer` interface; **Kafka is the first implementation**, swappable for
-the custom gRPC queue later.
+`queue.Producer` interface; the **custom gRPC queue is the primary implementation**,
+with Kafka available as an alternative.
 
 ### Dynamic scaling (the headline requirement)
 
@@ -346,7 +344,7 @@ of truth), rather than maintained by hand:
 make openapi
 ```
 
-The Swagger UI is wired into the router and served at `/swagger/index.html`S (raw
+The Swagger UI is wired into the router and served at `/swagger/index.html` (raw
 spec at `/swagger/doc.json`).
 
 ## Reference data
@@ -515,6 +513,40 @@ so no extra configuration is needed.
 | `make cover` | Run tests and print total statement coverage. |
 | `make cover-html` | Generate a browsable `coverage.html` report. |
 
+## Switching between Kafka and the custom gRPC queue
+
+Both implementations are available at runtime via the `QUEUE_TYPE` environment
+variable. Only the selected broker's env vars are used; the other's are ignored.
+
+| `QUEUE_TYPE` | Queue pod needed | Kafka needed | Key env vars |
+|---|---|---|---|
+| `grpc` (Makefile default) | yes (`make deploy-queue`) | no | `QUEUE_ADDR=gpu-telemetry-queue:50051` |
+| `kafka` | no | yes (`make deploy-kafka`) | `KAFKA_BROKERS=kafka:9092` |
+
+### Custom gRPC queue (default)
+
+```bash
+make deploy                   # QUEUE_TYPE=grpc is already the Makefile default
+```
+
+### Kafka
+
+**minikube:**
+```bash
+make deploy-timescaledb
+make deploy-kafka             # raw StatefulSet — not a Helm chart
+make deploy-collector         # QUEUE_TYPE=kafka is the binary default
+make deploy-streamer
+make deploy-api
+# or in one shot:
+make deploy QUEUE_TYPE=kafka
+```
+
+**Docker Compose (always Kafka — no flag needed):**
+```bash
+docker compose -f deploy/docker-compose.yaml up --build
+```
+
 ## Roadmap
 
 Done:
@@ -534,8 +566,10 @@ Done:
   demonstrable via Docker Compose and on minikube.
 - ✅ **Unit tests + coverage** via the Makefile (`make cover`).
 
-The following is the remaining project goal:
-- **Stage 2+ Custom Queue**: Implement shared persistence (e.g. S3/EFS), smart flushing, and peer replication for high availability.
+Remaining:
+- **Stage 2 Custom Queue**: Shared persistence (S3/EFS), smart flush algorithm (size + time + memory-pressure thresholds), Queue-vs-Log mode.
+- **Stage 3 Custom Queue**: Consumer group state (`__consumer_offsets` internal topic), per-group offset tracking.
+- **Stage 4 Custom Queue**: In-memory peer replication, Metadata Raft cluster, failover for high availability.
 
 ## AI assistance
 

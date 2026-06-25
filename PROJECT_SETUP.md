@@ -30,7 +30,7 @@ Queue $\rightarrow$ Collector $\rightarrow$ TimescaleDB $\rightarrow$ API).
 
 ## 5. Containerise the API
 
-- Add a multi-stage Dockerfile under [`deploy/build/`](deploy/build基础上): build a
+- Add a multi-stage Dockerfile under [`deploy/build/`](deploy/build/): build a
   static binary in a Go stage, then copy it into a minimal
   `distroless/static:nonroot` runtime stage.
 - Add a [`.dockerignore`](.dockerignore) to keep the build context small.
@@ -96,9 +96,37 @@ Queue $\rightarrow$ Collector $\rightarrow$ TimescaleDB $\rightarrow$ API).
   `--scale streamer=3 --scale collector=3`.
 - **minikube:** a single `make deploy` orchestrates the full sequence:
   `deploy-timescaledb` $\rightarrow$ `deploy-queue` (Custom gRPC) $\rightarrow$ `deploy-collector` $\rightarrow$ `deploy-streamer` $\rightarrow$ `deploy-api`.
-  
-  You can switch the pipeline to use the custom gRPC queue by running:
-  ```bash
-  make deploy QUEUE_TYPE=grpc QUEUE_ADDR=gpu-telemetry-queue:50051
-  ```
-  Or use Kafka by setting `QUEUE_TYPE=kafka`.
+
+## 13. Switching between Kafka and the custom gRPC queue
+
+The queue implementation is selected at deploy time via `QUEUE_TYPE`. Only the
+relevant env vars are used; the other broker's settings are ignored.
+
+| `QUEUE_TYPE` | Queue pod needed | Kafka needed | Key env vars |
+|---|---|---|---|
+| `grpc` (default in `make deploy`) | yes (`deploy-queue`) | no | `QUEUE_ADDR=gpu-telemetry-queue:50051` |
+| `kafka` | no | yes (`deploy-kafka`) | `KAFKA_BROKERS=kafka:9092` |
+
+**Run against the custom gRPC queue (minikube):**
+```bash
+make deploy                          # QUEUE_TYPE=grpc is the Makefile default
+# or explicitly:
+make deploy QUEUE_TYPE=grpc
+```
+
+**Run against Kafka (minikube):**
+```bash
+make deploy-timescaledb
+make deploy-kafka                    # raw StatefulSet, not a Helm chart
+make deploy-collector                # QUEUE_TYPE=kafka is the env default
+make deploy-streamer
+make deploy-api
+# or all at once:
+make deploy QUEUE_TYPE=kafka
+```
+
+**Run against Kafka locally (Compose — always Kafka):**
+```bash
+docker compose -f deploy/docker-compose.yaml up --build
+```
+The Compose stack wires Kafka directly; `QUEUE_TYPE` is not needed.

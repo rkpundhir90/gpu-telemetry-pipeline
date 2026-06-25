@@ -10,14 +10,11 @@ import (
 	"gpu-telemetry-pipeline/internal/queue"
 )
 
-// ProducerConfig holds the settings needed to publish to a topic.
+// ProducerConfig holds settings for publishing to a topic.
 type ProducerConfig struct {
 	Brokers []string
 	Topic   string
-
-	// BatchTimeout bounds how long the writer waits to fill a batch before
-	// flushing. A small value keeps streaming latency low; zero applies a
-	// sensible default.
+	// Zero applies a 50 ms default.
 	BatchTimeout time.Duration
 }
 
@@ -26,10 +23,8 @@ type Producer struct {
 	writer *kafkago.Writer
 }
 
-// NewProducer constructs a producer for the given topic. Messages are routed by
-// key with a hash balancer, so keying by GPU UUID pins each GPU to one partition
-// and preserves per-GPU ordering. RequireAll acks make a successful Publish mean
-// the data is durably replicated before the Streamer moves on.
+// NewProducer creates a producer that routes by key (hash balancer), preserving
+// per-GPU ordering, with RequireAll acks for durable writes.
 func NewProducer(cfg ProducerConfig) (*Producer, error) {
 	if len(cfg.Brokers) == 0 {
 		return nil, errors.New("kafka: at least one broker is required")
@@ -44,22 +39,18 @@ func NewProducer(cfg ProducerConfig) (*Producer, error) {
 	}
 
 	w := &kafkago.Writer{
-		Addr:         kafkago.TCP(cfg.Brokers...),
-		Topic:        cfg.Topic,
-		Balancer:     &kafkago.Hash{},
-		RequiredAcks: kafkago.RequireAll,
-		BatchTimeout: batchTimeout,
-		// The Streamer may start before the collector's topic exists (e.g. in the
-		// compose stack); let the first write create it.
-		AllowAutoTopicCreation: true,
+		Addr:                   kafkago.TCP(cfg.Brokers...),
+		Topic:                  cfg.Topic,
+		Balancer:               &kafkago.Hash{},
+		RequiredAcks:           kafkago.RequireAll,
+		BatchTimeout:           batchTimeout,
+		AllowAutoTopicCreation: true, // streamer may start before topic exists
 	}
 
 	return &Producer{writer: w}, nil
 }
 
-// Publish writes the messages and blocks until they are acknowledged. kafka-go
-// retries transient errors internally; a returned error is terminal for this
-// call and the caller should retry.
+// Publish blocks until all messages are acknowledged.
 func (p *Producer) Publish(ctx context.Context, msgs ...queue.Message) error {
 	if len(msgs) == 0 {
 		return nil

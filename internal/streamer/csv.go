@@ -10,23 +10,17 @@ import (
 	"gpu-telemetry-pipeline/internal/telemetry"
 )
 
-// labelPair matches one key="value" entry inside the DCGM "labels_raw" column.
-// encoding/csv has already collapsed the doubled quotes, so values are plainly
-// double-quoted here.
+// labelPair matches one key="value" entry in the DCGM "labels_raw" column.
+// encoding/csv has already collapsed doubled quotes, so values are plain double-quoted.
 var labelPair = regexp.MustCompile(`(\w+)="([^"]*)"`)
 
-// parseCSV reads DCGM-exporter rows into Record templates. The Timestamp field
-// is left zero: the Streamer stamps each record with the processing time when it
-// publishes, per the project's "time of processing is the datapoint's timestamp"
-// rule, so the original CSV timestamp column is intentionally ignored.
-//
-// Columns are resolved by header name rather than position, so a reordered
-// export still parses. Rows missing a UUID or metric name, or with an
-// unparseable value, are skipped (they cannot become a usable datapoint); the
-// returned count reflects only usable records.
+// parseCSV reads DCGM-exporter rows into Record templates. Timestamp is left
+// zero — Run stamps it at publish time. Columns are resolved by header name so
+// a reordered export still parses. Rows missing uuid/metric or with an
+// unparseable value are skipped.
 func parseCSV(r io.Reader) ([]telemetry.Record, error) {
 	cr := csv.NewReader(r)
-	cr.FieldsPerRecord = -1 // tolerate ragged rows; we read fields by name
+	cr.FieldsPerRecord = -1 // tolerate ragged rows
 
 	header, err := cr.Read()
 	if err != nil {
@@ -90,8 +84,7 @@ func parseCSV(r io.Reader) ([]telemetry.Record, error) {
 	return records, nil
 }
 
-// parseLabels turns the DCGM "labels_raw" column into a map. Returns nil for an
-// empty column so the record omits the labels field entirely.
+// parseLabels parses the DCGM "labels_raw" column into a map; returns nil for empty input.
 func parseLabels(raw string) map[string]string {
 	if raw == "" {
 		return nil

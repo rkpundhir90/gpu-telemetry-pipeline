@@ -15,6 +15,7 @@ lightweight ADRs (Architecture Decision Records): each one captures the
 5. [Telemetry Streamer: stateless replay, data on a PVC](#5-telemetry-streamer-stateless-replay-data-on-a-pvc)
 6. [Kafka deployment: direct StatefulSet in KRaft mode](#6-kafka-deployment-direct-statefulset-in-kraft-mode)
 7. [TimescaleDB database initialisation: post-install Job](#7-timescaledb-database-initialisation-post-install-job)
+8. [Custom gRPC queue: hand-written bindings and JSON codec override](#8-custom-grpc-queue-hand-written-bindings-and-json-codec-override)
 
 ---
 
@@ -119,7 +120,7 @@ for the API's current and future queries (rollups, percentiles, retention).
 
 ## 2. Message queue: Kafka first, behind an interface
 
-**Status:** Accepted (interim — Kafka is a staging/testing choice)
+**Status:** Accepted (Kafka retained as an alternative; custom gRPC queue now the primary implementation)
 
 ### Context
 
@@ -181,12 +182,10 @@ Once these hold on Kafka, the custom queue is validated against the *same* asser
   static distroless image.
 - **Positive:** The interface boundary is the design insight that satisfies both
   "use Kafka for now" and the brief's "build a custom queue".
-- **Trade-off / follow-up:** Kafka is interim, now used by both a `queue.Consumer`
-  (Collector) and a `queue.Producer` (Streamer). The remaining step toward the
-  brief's actual requirement is a custom implementation of those two interfaces —
-  additive, with no change to the Streamer or Collector logic. The design of that
-  custom queue (stateless gRPC broker, phased implementation plan, smart flush
-  algorithm, and peer replication strategy) is captured in [QUEUE.md](QUEUE.md).
+- **Follow-up (complete):** The custom `queue.Consumer` / `queue.Producer`
+  implementation (`internal/queue/grpc`, `internal/queue/server`, `cmd/queue`) is
+  built and running. Swapping was additive — the Collector and Streamer engines
+  were not changed. See [QUEUE.md](QUEUE.md) for the design and Stages 2–4 roadmap.
 
 ---
 
@@ -495,3 +494,86 @@ failure rather than a silent crash loop later.
   whether the PVC is brand new or years old.
 - **Trade-off:** One extra Kubernetes object and one extra blocking step in the
   install script; the overhead is negligible (~5 s) for a dev/test deployment.
+
+---
+
+## 8. Custom gRPC queue: hand-written bindings and JSON codec override
+
+**Status:** Accepted (Stage 1 complete)
+
+### Context
+
+The custom queue exposes a gRPC API (`Produce`, `Consume`, `Commit`). The natural
+path is to define a `.proto` schema, run `protoc` to generate Go types, and build
+the service on top of the generated code. Two concerns arose:
+
+1. **Toolchain friction.** `protoc` and its Go plugins are not standard Go
+   tooling; adding them to the build requires additional install steps, pinned
+   versions, and either a `go generate` hook or a separate code-gen step — all
+   overhead for a service that will eventually be retired or significantly
+   redesigned as Stage 2–4 land.
+2. **Proto dependency.** protoc-generated types implement `proto.Message` and
+   are tightly coupled to the protobuf wire format, which is not what we want:
+   the pipeline already uses JSON between Streamer and Collector, and the queue
+   broker is internal infrastructure — wire format flexibility matters more than
+   protobuf compatibility.
+
+### Decision
+
+**Write the gRPC service bindings by hand** and **override the gRPC codec** to
+use `encoding/json` instead of protobuf.
+
+**Hand-written bindings** (`internal/queue/grpc/api.go`) define the request /
+response types as plain Go structs and register the service using gRPC's
+low-level `grpc.ServiceDesc` + handler functions. No `protoc` dependency, no
+generated files, no `proto.Message` interface required.
+
+**JSON codec override** (`internal/queue/grpc/codec.go`) registers a codec named
+`"proto"` via `encoding.RegisterCodec`:
+
+```go
+type jsonCodec struct{}
+func (jsonCodec) Marshal(v any) ([]byte, error)     { return json.Marshal(v) }
+func (jsonCodec) Unmarshal(data []byte, v any) error { return json.Unmarshal(data, v) }
+func (jsonCodec) Name() string                       { return "proto" }
+func init() { encoding.RegisterCodec(jsonCodec{}) }
+```
+
+The init runs after gRPC's built-in `encoding/proto` codec init (because the
+grpc package is a transitive import), so `jsonCodec{}` overwrites the default.
+grpc-go's `getCodec("proto")` checks `GetCodec` (the v1 registry) before
+`GetCodecV2`, finds `jsonCodec{}`, wraps it in a `codecV1Bridge`, and JSON
+marshaling is used end-to-end on both client and server.
+
+The proto schema (`proto/queue.proto`) is kept as documentation and a reference
+for future code generation (Stages 2–4 may regenerate when the API stabilises),
+but is **not used to generate code today**.
+
+### Alternatives considered
+
+- **Use `protoc`-generated types.** Rejected for Stage 1: adds toolchain friction
+  and couples the wire format to protobuf for an internal service. Revisit if the
+  queue needs to interoperate with non-Go clients.
+- **Use a non-`proto` codec name** (e.g. register as `"json"`). Rejected: the
+  gRPC content-type header defaults to `application/grpc+proto`; both sides must
+  agree on the same codec name. Naming our codec `"proto"` keeps the default
+  content-type and avoids requiring explicit codec negotiation on every call.
+- **Use `google.golang.org/protobuf/proto` or `github.com/gogo/protobuf`.**
+  Rejected: the hand-written approach has zero generated files and zero proto
+  dependencies outside of `google.golang.org/grpc` which was already required.
+
+### Consequences
+
+- **Positive:** Zero `protoc` toolchain dependency; `go build ./...` is
+  self-contained. Adding new RPC methods is a plain Go struct + handler, no
+  code-gen step.
+- **Positive:** Wire format (JSON) is human-readable and debuggable with standard
+  tools (`kubectl exec … curl`, `grpcurl -plaintext -d '{}'`).
+- **Trade-off:** The hand-written `grpc.ServiceDesc` + codec override is not
+  idiomatic gRPC Go. Future developers need to understand the codec registration
+  trick to debug marshaling issues. The comment in `codec.go` and this ADR
+  document the reasoning.
+- **Trade-off:** JSON is slower and larger on the wire than protobuf. For Stage 1
+  (in-memory, loopback gRPC) this is negligible. If Stage 4 (peer replication)
+  introduces cross-node replication at high throughput, re-evaluating the codec
+  is worthwhile.

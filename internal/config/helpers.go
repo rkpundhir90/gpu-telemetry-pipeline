@@ -31,8 +31,7 @@ func getenvBool(key string, def bool) bool {
 	return def
 }
 
-// getenvDuration parses a Go duration string (e.g. "500ms", "2s") from the
-// environment, falling back to def on absence or parse error.
+// getenvDuration parses a Go duration string (e.g. "500ms") from the environment.
 func getenvDuration(key string, def time.Duration) time.Duration {
 	if v, ok := os.LookupEnv(key); ok {
 		if d, err := time.ParseDuration(v); err == nil {

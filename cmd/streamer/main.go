@@ -1,11 +1,3 @@
-// Command streamer runs the Telemetry Streamer: it loads GPU telemetry from a
-// CSV and replays it onto the queue, stamping each datapoint with its processing
-// time.
-//
-// Horizontal scaling is coordination-free: run multiple replicas and each streams
-// the dataset independently, multiplying the telemetry rate. Because the
-// timestamp is the publish time, replicas produce distinct datapoints rather than
-// duplicates. See deploy/helm for the Deployment + HorizontalPodAutoscaler.
 package main
 
 import (

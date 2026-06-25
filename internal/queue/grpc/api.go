@@ -6,7 +6,7 @@ import (
 	"google.golang.org/grpc"
 )
 
-// These structs mirror the protobuf definitions in proto/queue.proto
+// Hand-written bindings mirroring proto/queue.proto (no protoc dependency).
 type ProduceRequest struct {
 	Topic    string
 	Messages []*MessagePayload
@@ -42,14 +42,12 @@ type CommitResponse struct {
 	Success bool
 }
 
-// QueueServiceClient is the client API for QueueService
 type QueueServiceClient interface {
 	Produce(ctx context.Context, in *ProduceRequest, opts ...grpc.CallOption) (*ProduceResponse, error)
 	Consume(ctx context.Context, in *ConsumeRequest, opts ...grpc.CallOption) (*ConsumeResponse, error)
 	Commit(ctx context.Context, in *CommitRequest, opts ...grpc.CallOption) (*CommitResponse, error)
 }
 
-// QueueServiceServer is the server API for QueueService
 type QueueServiceServer interface {
 	Produce(context.Context, *ProduceRequest) (*ProduceResponse, error)
 	Consume(context.Context, *ConsumeRequest) (*ConsumeResponse, error)

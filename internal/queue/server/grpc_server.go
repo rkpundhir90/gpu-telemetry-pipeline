@@ -34,10 +34,7 @@ func (s *QueueGRPCServer) Produce(ctx context.Context, req *grpc.ProduceRequest)
 func (s *QueueGRPCServer) Consume(ctx context.Context, req *grpc.ConsumeRequest) (*grpc.ConsumeResponse, error) {
 	topic := s.broker.GetTopic(req.Topic)
 
-	// The wait function checks if the context is still active.
-	wait := func() bool {
-		return ctx.Err() == nil
-	}
+	wait := func() bool { return ctx.Err() == nil }
 
 	msg, offset, err := topic.Consume(req.GroupId, wait)
 	if err != nil {

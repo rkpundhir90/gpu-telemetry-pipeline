@@ -5,21 +5,24 @@ import (
 	"fmt"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"gpu-telemetry-pipeline/internal/queue"
 )
 
 type producer struct {
+	conn   *grpc.ClientConn
 	client QueueServiceClient
 	topic  string
 }
 
 func NewProducer(addr, topic string) (queue.Producer, error) {
-	conn, err := grpc.Dial(addr, grpc.WithInsecure())
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, fmt.Errorf("grpc producer dial error: %w", err)
 	}
 
 	return &producer{
+		conn:   conn,
 		client: NewQueueServiceClient(conn),
 		topic:  topic,
 	}, nil
@@ -50,22 +53,24 @@ func (p *producer) Publish(ctx context.Context, msgs ...queue.Message) error {
 }
 
 func (p *producer) Close() error {
-	return nil // In a real client, we'd close the connection.
+	return p.conn.Close()
 }
 
 type consumer struct {
+	conn    *grpc.ClientConn
 	client  QueueServiceClient
 	topic   string
 	groupID string
 }
 
 func NewConsumer(addr, topic, groupID string) (queue.Consumer, error) {
-	conn, err := grpc.Dial(addr, grpc.WithInsecure())
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, fmt.Errorf("grpc consumer dial error: %w", err)
 	}
 
 	return &consumer{
+		conn:    conn,
 		client:  NewQueueServiceClient(conn),
 		topic:   topic,
 		groupID: groupID,
@@ -89,7 +94,6 @@ func (c *consumer) Commit(ctx context.Context, msgs ...queue.Message) error {
 		return nil
 	}
 
-	// We commit the last offset in the batch.
 	lastMsg := msgs[len(msgs)-1]
 	offset, ok := lastMsg.Raw().(int64)
 	if !ok {
@@ -109,5 +113,5 @@ func (c *consumer) Commit(ctx context.Context, msgs ...queue.Message) error {
 }
 
 func (c *consumer) Close() error {
-	return nil
+	return c.conn.Close()
 }

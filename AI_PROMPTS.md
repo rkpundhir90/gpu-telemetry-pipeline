@@ -103,7 +103,7 @@ with its processing time, loop to simulate a continuous stream, key by GPU UUID)
 a separate image and Helm chart with an HPA, a PVC + data-loader for the CSV, and
 unit tests.
 
-### 8. Wiring the API to the store
+### 8. Wiring the API to the store (original session)
 
 > "Update the API as well for these backend services/store changes."
 
@@ -189,3 +189,62 @@ required manual intervention or human course-correction:
 
 These corrections are the reason every AI-generated output in this project was
 reviewed before being kept.
+
+---
+
+### 9. The Custom gRPC Message Queue (Stage 1)
+
+> "Implement a custom message queue to replace Kafka. Use gRPC. Start with a
+> pure in-memory broker behind the existing `queue.Consumer` / `queue.Producer`
+> interfaces. Add a feature flag `QUEUE_TYPE=grpc` so Kafka and the new queue
+> can run side by side."
+
+> "Deploy the queue as its own Kubernetes service with a Helm chart, add
+> NetworkPolicies so the collector and streamer can reach it, and update the
+> Makefile with build/deploy/undeploy targets."
+
+> "Fix the errors in the running pods — the streamer is failing with
+> `proto: failed to marshal, message is *grpc.ProduceRequest, want proto.Message`."
+
+> "Update all the markup files for documentation."
+
+From these the assistant built: the in-memory broker (`internal/queue/server/`),
+hand-written gRPC service bindings (`internal/queue/grpc/api.go`) without protoc,
+a JSON codec override that registers as `"proto"` so gRPC uses `encoding/json`
+instead of protobuf (`internal/queue/grpc/codec.go`), producer/consumer clients
+(`internal/queue/grpc/client.go`), the queue binary (`cmd/queue/`), a Helm chart
+(`deploy/helm/gpu-telemetry-queue/`), a Dockerfile, and Makefile targets for the
+full build/deploy lifecycle.
+
+## Where AI fell short (custom queue session)
+
+**During the gRPC queue build**
+
+18. **gRPC marshal error in production.** The streamer pods failed with
+    `proto: failed to marshal, message is *grpc.ProduceRequest, want proto.Message`.
+    The fix (`codec.go`) was correct, but the streamer image in minikube was stale —
+    built before `codec.go` existed. The root cause took multiple rounds to diagnose:
+    `minikube image load` silently no-ops when a running container holds the same
+    tag, so the new image was never actually loaded. Fix: scale to 0 replicas,
+    `minikube image rm`, reload, scale back to 1.
+
+19. **Docker exec cache mounts obscured stale builds.** `docker build --no-cache`
+    clears the layer cache but not BuildKit exec cache mounts
+    (`--mount=type=cache,target=/root/.cache/go-build`). The Go build cache
+    persisted independently, making it appear a rebuild had occurred when it had
+    not. Fix: `docker builder prune --filter type=exec.cachemount -f` before
+    rebuilding.
+
+20. **Deprecated gRPC dial API.** The initial client code used `grpc.Dial` and
+    `grpc.WithInsecure()`, both deprecated in grpc-go v1.27+. Updated to
+    `grpc.NewClient` + `insecure.NewCredentials()`.
+
+21. **Queue Helm chart Chart.yaml had `type: app` (invalid).** Helm requires
+    `type: application` or `type: library`; the invalid value caused chart
+    validation to fail.
+
+22. **NetworkPolicy gaps.** The collector and streamer charts initially opened
+    only Kafka egress (port 9092). When `QUEUE_TYPE=grpc`, they need egress to
+    port 50051 instead. The queue chart had no NetworkPolicy at all. Both were
+    fixed: Collector/Streamer NetworkPolicies are now conditional on `queue.type`,
+    and the queue chart has its own allow rule for gRPC ingress.

@@ -1,9 +1,3 @@
-// Command collector runs the Telemetry Collector: it consumes GPU telemetry,
-// and persists it to PostgreSQL/TimescaleDB.
-//
-// Horizontal scaling is achieved by running multiple replicas with the same
-// consumer group ID; the queue distributes messages among them. See deploy/helm for
-// the Deployment + HorizontalPodAutoscaler.
 package main
 
 import (

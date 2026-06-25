@@ -28,12 +28,12 @@ spec:
         - protocol: TCP
           port: 53
 ---
-# 3) Allow egress to Kafka. The broker may be in- or out-of-cluster, so this
-#    allows the broker port to any destination.
+# 3) Allow egress to the queue (Kafka or gRPC). The endpoint may be in- or
+#    out-of-cluster, so the port is opened to any destination.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "app.fullname" . }}-allow-kafka
+  name: {{ include "app.fullname" . }}-allow-queue
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "app.labels" . | nindent 4 }}
@@ -45,8 +45,13 @@ spec:
     - Egress
   egress:
     - ports:
+        {{- if eq .Values.queue.type "grpc" }}
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.grpcQueuePort }}
+        {{- else }}
         - protocol: TCP
           port: {{ .Values.networkPolicy.kafkaPort }}
+        {{- end }}
 ---
 # 4) Allow ingress to the health port. Kubelet probes originate from the node, so
 #    no "from" selector is set (any source may reach the health port only).

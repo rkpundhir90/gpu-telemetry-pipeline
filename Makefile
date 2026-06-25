@@ -282,8 +282,8 @@ undeploy:
 	-kubectl delete -f deploy/namespace.yaml
 
 # Tear down the whole pipeline: uninstall all releases, then delete the namespace.
-undeploy-all: undeploy-streamer undeploy-collector undeploy
-	@echo "✅ removed API + Collector + Streamer from namespace $(NAMESPACE)"
+undeploy-all: undeploy-streamer undeploy-collector undeploy-queue undeploy
+	@echo "✅ removed API + Collector + Streamer + Queue from namespace $(NAMESPACE)"
 
 # Test & coverage
 .PHONY: test cover cover-html

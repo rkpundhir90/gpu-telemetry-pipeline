@@ -37,8 +37,7 @@ func main() {
 }
 
 func run(ctx context.Context, cfg config.API, log *slog.Logger) error {
-	// Bound the initial connect so a misconfigured DSN fails fast instead of
-	// hanging the pod's startup.
+	// fail fast on a misconfigured DSN rather than hanging pod startup
 	connectCtx, cancelConnect := context.WithTimeout(ctx, 30*time.Second)
 	defer cancelConnect()
 

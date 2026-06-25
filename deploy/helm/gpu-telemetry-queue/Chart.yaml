@@ -1,6 +1,6 @@
 apiVersion: v2
 name: gpu-telemetry-queue
 description: Custom gRPC Message Queue for GPU Telemetry Pipeline
-type: app
+type: application
 version: 0.1.0
 appVersion: "0.1.0"

@@ -1,15 +1,5 @@
-// Package streamer implements the Telemetry Streamer: it loads GPU telemetry
-// from a CSV and replays it onto the queue, stamping each datapoint with the
-// time it is processed (published), per the project brief.
-//
-// Scaling is horizontal and coordination-free, mirroring the Collector. Each
-// replica streams the full dataset independently; because every datapoint's
-// timestamp is its publish time, two replicas emitting the same CSV row produce
-// two distinct datapoints rather than a duplicate. Adding replicas therefore
-// multiplies the telemetry rate with no sharding or shared state, so a
-// Deployment + HorizontalPodAutoscaler can scale Streamers up and down freely.
-// Keying each message by GPU UUID keeps a given GPU's series on one partition,
-// so it stays ordered through the pipeline.
+// Package streamer loads GPU telemetry from a CSV and replays it onto the queue,
+// stamping each datapoint with its publish time.
 package streamer
 
 import (
@@ -26,13 +16,8 @@ import (
 
 // Config tunes the replay behaviour of a Streamer.
 type Config struct {
-	// Interval is the delay between successive datapoints. It sets the per-replica
-	// stream rate; the fleet's aggregate rate scales with the replica count.
-	Interval time.Duration
-
-	// Loop replays the dataset endlessly to simulate a continuous stream. When
-	// false the Streamer publishes the dataset once and returns.
-	Loop bool
+	Interval time.Duration // per-replica delay between datapoints
+	Loop     bool          // replay the dataset endlessly
 }
 
 func (c *Config) withDefaults() {
@@ -41,11 +26,11 @@ func (c *Config) withDefaults() {
 	}
 }
 
-// Stats are cumulative counters exposed for observability (logs / health).
+// Stats are cumulative counters exposed for observability.
 type Stats struct {
-	Streamed    atomic.Int64 // datapoints successfully published
-	PublishErrs atomic.Int64 // failed publish attempts
-	Loops       atomic.Int64 // completed passes over the dataset
+	Streamed    atomic.Int64
+	PublishErrs atomic.Int64
+	Loops       atomic.Int64
 }
 
 // Streamer replays a fixed set of records onto a queue.Producer.
@@ -57,10 +42,8 @@ type Streamer struct {
 	stats    Stats
 }
 
-// Load reads telemetry records from the CSV at path. The path points at a file
-// mounted from a PersistentVolume, so the dataset is provisioned independently of
-// the image and read at runtime. The records carry no timestamp; Run stamps each
-// one at publish time.
+// Load reads telemetry records from the CSV at path. Timestamps are left zero;
+// Run stamps each record at publish time.
 func Load(path string) ([]telemetry.Record, error) {
 	if path == "" {
 		return nil, errors.New("streamer: csv path is required (set STREAMER_CSV_PATH)")
@@ -73,8 +56,7 @@ func Load(path string) ([]telemetry.Record, error) {
 	return parseCSV(f)
 }
 
-// New constructs a Streamer over the given records. The producer is owned by the
-// caller and must outlive Run; Run does not close it.
+// New constructs a Streamer. The producer must outlive Run.
 func New(producer queue.Producer, records []telemetry.Record, cfg Config, log *slog.Logger) *Streamer {
 	cfg.withDefaults()
 	if log == nil {
@@ -83,11 +65,9 @@ func New(producer queue.Producer, records []telemetry.Record, cfg Config, log *s
 	return &Streamer{producer: producer, records: records, log: log, cfg: cfg}
 }
 
-// Stats returns a pointer to the live counters.
 func (s *Streamer) Stats() *Stats { return &s.stats }
 
-// Run replays the dataset until ctx is cancelled (or once, if Loop is false). It
-// returns nil on a clean (context-cancelled) shutdown.
+// Run replays the dataset until ctx is cancelled (or once if Loop is false).
 func (s *Streamer) Run(ctx context.Context) error {
 	s.log.Info("streamer started",
 		"records", len(s.records),
@@ -123,10 +103,8 @@ func (s *Streamer) Run(ctx context.Context) error {
 	}
 }
 
-// publish stamps the record with the current processing time and writes it,
-// keyed by GPU UUID. A publish failure is counted and logged but does not stop
-// the stream: this is a best-effort simulator, and the next datapoint follows on
-// the next tick.
+// publish stamps the record with now and writes it keyed by UUID. A publish
+// failure is counted but does not stop the stream.
 func (s *Streamer) publish(ctx context.Context, rec *telemetry.Record) {
 	rec.Timestamp = time.Now().UTC()
 
@@ -139,7 +117,7 @@ func (s *Streamer) publish(ctx context.Context, rec *telemetry.Record) {
 
 	msg := queue.NewMessage([]byte(rec.UUID), value, nil)
 	if err := s.producer.Publish(ctx, msg); err != nil {
-		// A cancelled context during shutdown is expected, not an error to count.
+		// Cancelled context during shutdown is expected; don't count it.
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return
 		}
@@ -148,8 +126,7 @@ func (s *Streamer) publish(ctx context.Context, rec *telemetry.Record) {
 		return
 	}
 	n := s.stats.Streamed.Add(1)
-	// Log the first publish and then every 500th to confirm Kafka connectivity
-	// without flooding the log at high throughput.
+	// Log first publish then every 500th to confirm connectivity without flooding.
 	if n == 1 || n%500 == 0 {
 		s.log.Info("publishing records",
 			"streamed", n,
