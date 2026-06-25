@@ -32,11 +32,12 @@ internal/queue/grpc/codec.go — message codec
 ```
 Streamer (producer)
   └─► grpc.Produce(batch)
-        └─► Topic.Produce() → append to ring buffer
-              └─► cond.Broadcast() → wake waiting consumers
-                    └─► Topic.ConsumeBatch() → server-streaming push
-                          └─► Collector (consumer) internal batch buffer
-                                └─► queue.Consumer.Fetch() → one message at a time
+        └─► Topic.Produce() → write to ring buffer [buf[next % cap]]
+              └─► close(notify) → wake waiting consumers
+                    └─► Topic.ConsumeBatch() → dispatcher goroutine reads ring
+                          └─► batchCh (buffered, depth 4) → main goroutine encodes + sends
+                                └─► Collector (consumer) internal batch buffer
+                                      └─► queue.Consumer.Fetch() → one message at a time
 ```
 
 ## gRPC API
@@ -83,18 +84,28 @@ type BatchedMessage struct {
 
 ## Fault Tolerance & Reliability
 
-### Bounded in-memory buffer
+### Bounded in-memory ring buffer
 
-`Topic` holds at most `maxMessages` messages (default: 10 000, configurable via `QUEUE_MAX_MESSAGES`). When the limit is exceeded, the oldest quarter is evicted and `baseOffset` advances. Consumers whose delivered offset fell below `baseOffset` are silently reset to the new base — they miss the evicted messages but stay connected and continue rather than crashing.
+`Topic` is backed by a fixed-size circular array (`buf []Message`, length `maxMessages`). Every write is:
 
-This gives a clear backpressure model: producers that outpace consumers by more than `maxMessages` cause data loss by design (preferable to OOM). The `/stats` endpoint exposes `base_offset` and `head_offset` so the gap is observable.
+```go
+buf[next % cap] = msg   // overwrite the slot (wraps around)
+next++
+if next - base > cap { base++ }  // evict oldest: advance pointer, no copy
+```
+
+This is true O(1) eviction — no allocation spike, no periodic batch copy. The buffer stays at exactly `cap` messages once full; memory usage is flat from the first overflow onward.
+
+Consumers whose delivered offset falls below `base` are silently reset to the new base — they miss the evicted messages but stay connected and continue. This is the intended behaviour: slow consumers lose stale data rather than causing the broker to grow unboundedly or crash.
 
 ```
-baseOffset         HEAD
-    │                │
-    ▼                ▼
-[msg₁₀₀₀ … msg₁₂₄₉]   ← only these 250 messages are buffered
+base                     Head (next)
+  │                        │
+  ▼                        ▼
+[msg₄ … msg₁₁]   ← cap=8 slots, always exactly 8 messages buffered once full
 ```
+
+The `/stats` endpoint exposes `base`, `head`, and `buffered` so the consumer lag is observable.
 
 ### Notify channel (close + replace)
 
@@ -110,6 +121,23 @@ case <-ctx.Done(): // shutdown or timeout
 The previous design used `sync.Cond`, which cannot be combined with `select`. The workaround was a goroutine per `ConsumeBatch` call that called `cond.Broadcast()` when the context was cancelled — one extra goroutine per active consumer per batch. The notify channel eliminates this entirely.
 
 The close happens **after** the producer releases its mutex, so woken consumers can acquire the lock immediately rather than queueing behind the producer.
+
+### Dispatcher goroutine pipeline (StreamConsume)
+
+`StreamConsume` runs a two-goroutine pipeline so ring-buffer reads and gRPC serialisation overlap instead of serialising:
+
+```
+dispatcher goroutine                     main goroutine
+────────────────────────                 ──────────────────────────────
+ConsumeBatch() [ring read]  ──────────►  batchCh (depth 4)
+ConsumeBatch() [ring read]  ──────────►     │
+ConsumeBatch() [ring read]  ──────────►     │  encode + stream.Send()
+                                             │  encode + stream.Send()
+```
+
+The dispatcher pre-fetches up to 4 batches into `batchCh` while the main goroutine is still encoding and writing the previous batch over the network. Slow network acks no longer stall ring consumption.
+
+Goroutine lifecycle is clean: when the client disconnects, `stream.Context()` is cancelled, `ConsumeBatch` returns on `ctx.Done()`, the dispatcher closes `batchCh`, and the `range batchCh` loop in the main goroutine exits naturally — no goroutine leak.
 
 ### Graceful shutdown
 
@@ -185,7 +213,8 @@ All features are complete and running end-to-end in minikube (`publish_errors: 0
 |---------|--------|
 | gRPC transport | Hand-written bindings — no protoc dependency |
 | Server-streaming delivery | Broker pushes batches; ~500k msg/s vs ~1k for unary |
-| Bounded buffer | Per-topic cap; oldest quarter evicted, lagging consumers reset |
+| O(1) ring buffer | Fixed circular array; per-message eviction, no allocation spikes, lagging consumers reset to base |
+| Dispatcher goroutine pipeline | Two-goroutine `StreamConsume`: ring reads and gRPC encodes overlap, depth-4 prefetch hides network latency |
 | Notify channel | `close`+replace on every Produce — no goroutine per consumer call |
 | Consumer reconnection | Exponential backoff (100ms → 10s), `waitForReady: true` |
 | Producer retry | Up to 5 retries with backoff on transient errors |
