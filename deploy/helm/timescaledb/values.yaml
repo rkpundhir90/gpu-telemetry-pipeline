@@ -24,6 +24,13 @@ primary:
       create_timescale.sql: |
         -- Create TimescaleDB extension in the telemetry database
         CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
+  # The Bitnami TLS env vars (POSTGRESQL_ENABLE_TLS) only work with the Bitnami
+  # PostgreSQL image. The timescale/timescaledb image uses vanilla PG startup
+  # scripts that don't interpret them, so we inject ssl settings directly.
+  extendedConfiguration: |
+    ssl = on
+    ssl_cert_file = '/opt/bitnami/postgresql/certs/tls.crt'
+    ssl_key_file  = '/opt/bitnami/postgresql/certs/tls.key'
   # Add emptyDir volume for /var/run/postgresql (needed for socket file)
   podSecurityContext:
     enabled: true
