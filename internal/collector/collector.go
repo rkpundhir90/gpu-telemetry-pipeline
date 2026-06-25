@@ -1,13 +1,5 @@
-// Package collector implements the Telemetry Collector: it consumes telemetry
-// from the queue, parses each message into a telemetry.Record, persists records
-// in batches, and acknowledges the queue only after a batch is durably stored.
-//
-// Scaling is horizontal and external to this code: each replica runs one
-// Collector bound to one queue.Consumer that is a member of a shared consumer
-// group. The queue distributes partitions across replicas, so adding or removing
-// replicas changes throughput without any code change here. Within a replica the
-// design is a single consume->batch->persist->commit loop, which keeps
-// at-least-once semantics simple and correct.
+// Package collector consumes telemetry from a queue, persists records in batches,
+// and commits offsets only after a batch is durably stored (at-least-once delivery).
 package collector
 
 import (
@@ -24,17 +16,9 @@ import (
 
 // Config tunes the batching behaviour of a Collector.
 type Config struct {
-	// BatchSize is the number of records that triggers a flush. Larger batches
-	// amortise the per-write cost; smaller batches lower end-to-end latency.
-	BatchSize int
-
-	// FlushInterval forces a flush of a partially-filled batch so low-traffic
-	// periods still persist promptly.
-	FlushInterval time.Duration
-
-	// FlushTimeout bounds a single persist+commit attempt, and also bounds the
-	// final drain flush during shutdown (when the run context is already done).
-	FlushTimeout time.Duration
+	BatchSize     int           // records before a forced flush
+	FlushInterval time.Duration // max time a partial batch waits before flushing
+	FlushTimeout  time.Duration // bounds a single persist+commit attempt
 }
 
 func (c *Config) withDefaults() {
@@ -49,12 +33,12 @@ func (c *Config) withDefaults() {
 	}
 }
 
-// Stats are cumulative counters exposed for observability (logs / health).
+// Stats are cumulative counters exposed for observability.
 type Stats struct {
-	Persisted atomic.Int64 // records successfully stored
-	Dropped   atomic.Int64 // messages discarded as unparseable/invalid
-	Batches   atomic.Int64 // batches committed
-	FlushErrs atomic.Int64 // failed flush attempts (records redelivered)
+	Persisted atomic.Int64
+	Dropped   atomic.Int64
+	Batches   atomic.Int64
+	FlushErrs atomic.Int64
 }
 
 // Collector wires a queue consumer to a telemetry store.
@@ -66,8 +50,7 @@ type Collector struct {
 	stats    Stats
 }
 
-// New constructs a Collector. The consumer and store are owned by the caller and
-// must outlive Run; Run does not close them.
+// New constructs a Collector. The consumer and store must outlive Run.
 func New(consumer queue.Consumer, st store.TelemetryStore, cfg Config, log *slog.Logger) *Collector {
 	cfg.withDefaults()
 	if log == nil {
@@ -76,22 +59,19 @@ func New(consumer queue.Consumer, st store.TelemetryStore, cfg Config, log *slog
 	return &Collector{consumer: consumer, store: st, log: log, cfg: cfg}
 }
 
-// Stats returns a pointer to the live counters.
 func (c *Collector) Stats() *Stats { return &c.stats }
 
-// item pairs a parsed record with the raw queue message it came from, so the
-// message can be committed once the record is persisted. parsed is false for
-// messages that failed to parse/validate: they are not stored, but their offset
-// is still committed so they do not block the partition (poison-message drop).
+// item pairs a parsed record with its source message. parsed=false for messages
+// that failed validation: they are not stored, but still committed to unblock
+// the partition (poison-message drop).
 type item struct {
 	msg    queue.Message
 	record telemetry.Record
 	parsed bool
 }
 
-// Run consumes until ctx is cancelled, then drains and flushes any buffered
-// records before returning. It returns nil on a clean (context-cancelled)
-// shutdown.
+// Run consumes until ctx is cancelled, then drains any buffered records before
+// returning. Returns nil on a clean shutdown.
 func (c *Collector) Run(ctx context.Context) error {
 	c.log.Info("collector started",
 		"batch_size", c.cfg.BatchSize,
@@ -113,8 +93,6 @@ func (c *Collector) Run(ctx context.Context) error {
 		select {
 		case it, ok := <-items:
 			if !ok {
-				// Fetch loop stopped (ctx cancelled or consumer closed). Drain
-				// whatever is buffered, then report why fetching ended.
 				c.flush(batch)
 				err := <-fetchErr
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -133,8 +111,7 @@ func (c *Collector) Run(ctx context.Context) error {
 	}
 }
 
-// fetchLoop pulls messages, parses them, and forwards items until ctx is done or
-// the consumer errors. It always closes items and reports the terminating error.
+// fetchLoop pulls messages, parses them, and forwards items until ctx is done.
 func (c *Collector) fetchLoop(ctx context.Context, items chan<- item, fetchErr chan<- error) {
 	defer close(items)
 	c.log.Info("fetch loop started — waiting for messages from queue")
@@ -166,7 +143,6 @@ func (c *Collector) fetchLoop(ctx context.Context, items chan<- item, fetchErr c
 				"bytes", len(msg.Value),
 				"preview", preview,
 			)
-			// parsed stays false: not stored, but still committed downstream.
 		} else {
 			it.record = rec
 			it.parsed = true
@@ -181,10 +157,9 @@ func (c *Collector) fetchLoop(ctx context.Context, items chan<- item, fetchErr c
 	}
 }
 
-// flush persists the parsed records in the batch and, on success, commits every
-// message (parsed and dropped) so offsets advance. On failure nothing is
-// committed, so the queue redelivers the whole batch (idempotent re-insert makes
-// this safe). It returns a fresh, empty batch slice for reuse.
+// flush persists parsed records and commits all messages (including dropped ones)
+// so offsets advance. On failure nothing is committed; the queue redelivers the
+// batch and idempotent re-insert makes that safe.
 func (c *Collector) flush(batch []item) []item {
 	if len(batch) == 0 {
 		return batch[:0]
@@ -206,12 +181,11 @@ func (c *Collector) flush(batch []item) []item {
 		c.stats.FlushErrs.Add(1)
 		c.log.Error("persist failed; batch will be redelivered",
 			"error", err, "records", len(records))
-		return batch[:0] // do not commit; queue redelivers
+		return batch[:0]
 	}
 
 	if err := c.consumer.Commit(ctx, msgs...); err != nil {
-		// Records are stored but the commit failed: they will be redelivered and
-		// re-inserted idempotently. Log and continue.
+		// Records stored but commit failed: redelivered and re-inserted idempotently.
 		c.stats.FlushErrs.Add(1)
 		c.log.Error("commit failed after persist; messages will be redelivered",
 			"error", err, "messages", len(msgs))

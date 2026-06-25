@@ -31,12 +31,16 @@ spec:
           securityContext:
             {{- toYaml .Values.containerSecurityContext | nindent 12 }}
           env:
+            - name: QUEUE_TYPE
+              value: {{ .Values.queue.type | quote }}
+            - name: QUEUE_ADDR
+              value: {{ .Values.queue.addr | quote }}
             - name: KAFKA_BROKERS
-              value: {{ .Values.kafka.brokers | quote }}
+              value: {{ .Values.queue.kafka.brokers | quote }}
             - name: KAFKA_TOPIC
-              value: {{ .Values.kafka.topic | quote }}
+              value: {{ .Values.queue.kafka.topic | quote }}
             - name: KAFKA_GROUP_ID
-              value: {{ .Values.kafka.groupId | quote }}
+              value: {{ .Values.queue.kafka.groupId | quote }}
             - name: COLLECTOR_BATCH_SIZE
               value: {{ .Values.collector.batchSize | quote }}
             - name: COLLECTOR_FLUSH_INTERVAL

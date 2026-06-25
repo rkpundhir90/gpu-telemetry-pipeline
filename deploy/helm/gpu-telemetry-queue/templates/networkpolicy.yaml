@@ -1,0 +1,48 @@
+# 1) Default-deny is provided by the API chart's policy (podSelector: {} covers
+#    every pod in the namespace). This chart adds only the traffic the queue needs.
+# 2) Allow DNS resolution (egress to kube-dns in kube-system).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "gpu-telemetry-queue.fullname" . }}-allow-dns
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gpu-telemetry-queue.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "gpu-telemetry-queue.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# 3) Allow ingress on the gRPC port from other pods in the namespace
+#    (the Streamer produces and the Collector consumes via this port).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "gpu-telemetry-queue.fullname" . }}-allow-grpc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gpu-telemetry-queue.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "gpu-telemetry-queue.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.port }}

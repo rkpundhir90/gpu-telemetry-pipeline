@@ -118,6 +118,16 @@ COLLECTOR_CHART_DIR ?= deploy/helm/gpu-telemetry-collector
 STREAMER_IMAGE     ?= gpu-telemetry-streamer
 STREAMER_RELEASE   ?= gpu-telemetry-streamer
 STREAMER_CHART_DIR ?= deploy/helm/gpu-telemetry-streamer
+
+# Queue service: the custom gRPC broker.
+QUEUE_IMAGE        ?= gpu-telemetry-queue
+QUEUE_RELEASE      ?= gpu-telemetry-queue
+QUEUE_CHART_DIR    ?= deploy/helm/gpu-telemetry-queue
+
+# Global Queue Configuration (used by Collector and Streamer)
+QUEUE_TYPE        ?= kafka
+QUEUE_ADDR        ?= gpu-telemetry-queue:50051
+
 # Telemetry data loaded onto the streamer's PVC at runtime (not baked into the image).
 STREAMER_CSV       ?= project_docs/dcgm_metrics_20250718_134233.csv
 STREAMER_CSV_NAME  ?= dcgm_metrics.csv
@@ -125,6 +135,7 @@ STREAMER_CSV_NAME  ?= dcgm_metrics.csv
 .PHONY: docker-build minikube-load namespace helm-lint helm-template deploy undeploy status expose service-url
 .PHONY: docker-build-collector minikube-load-collector deploy-collector undeploy-collector
 .PHONY: docker-build-streamer minikube-load-streamer deploy-streamer undeploy-streamer load-streamer-data
+.PHONY: docker-build-queue minikube-load-queue deploy-queue undeploy-queue
 .PHONY: deploy-api undeploy-api deploy-all undeploy-all
 
 # Dockerfiles live under deploy/build; the build context is the repo root (where
@@ -132,6 +143,7 @@ STREAMER_CSV_NAME  ?= dcgm_metrics.csv
 API_DOCKERFILE       ?= deploy/build/Dockerfile.api
 COLLECTOR_DOCKERFILE ?= deploy/build/Dockerfile.collector
 STREAMER_DOCKERFILE  ?= deploy/build/Dockerfile.streamer
+QUEUE_DOCKERFILE     ?= deploy/build/Dockerfile.queue
 
 # Build the minimal, multi-stage (distroless, static) image.
 docker-build:
@@ -146,6 +158,12 @@ docker-build-collector:
 
 minikube-load-collector: docker-build-collector
 	minikube image load $(COLLECTOR_IMAGE):$(TAG)
+
+docker-build-queue:
+	DOCKER_BUILDKIT=1 docker build -f $(QUEUE_DOCKERFILE) -t $(QUEUE_IMAGE):$(TAG) .
+
+minikube-load-queue: docker-build-queue
+	minikube image load $(QUEUE_IMAGE):$(TAG)
 
 docker-build-streamer:
 	DOCKER_BUILDKIT=1 docker build -f $(STREAMER_DOCKERFILE) -t $(STREAMER_IMAGE):$(TAG) .
@@ -182,8 +200,8 @@ deploy-api: minikube-load namespace
 undeploy-api:
 	-helm uninstall $(RELEASE) --namespace $(NAMESPACE)
 
-# Full deploy: TimescaleDB → Kafka → Collector → Streamer → API.
-deploy: deploy-timescaledb deploy-kafka deploy-collector deploy-streamer deploy-api
+# Full deploy: TimescaleDB → Queue → Collector → Streamer → API.
+deploy: deploy-timescaledb deploy-queue deploy-collector deploy-streamer deploy-api
 	@echo "✅ Full pipeline deployed to namespace $(NAMESPACE). Run 'make service-url' to connect."
 
 # Show what is running in the namespace, including the security posture.
@@ -208,11 +226,24 @@ deploy-collector: minikube-load-collector namespace
 	helm upgrade --install $(COLLECTOR_RELEASE) $(COLLECTOR_CHART_DIR) \
 		--namespace $(NAMESPACE) \
 		--create-namespace=false \
+		--set queue.type=$(QUEUE_TYPE) \
+		--set queue.addr=$(QUEUE_ADDR) \
 		--wait --timeout 180s
 	kubectl -n $(NAMESPACE) get deploy,pod,hpa -l app.kubernetes.io/name=gpu-telemetry-collector -o wide
 
 undeploy-collector:
 	-helm uninstall $(COLLECTOR_RELEASE) --namespace $(NAMESPACE)
+
+deploy-queue: minikube-load-queue namespace
+	helm lint $(QUEUE_CHART_DIR)
+	helm upgrade --install $(QUEUE_RELEASE) $(QUEUE_CHART_DIR) \
+		--namespace $(NAMESPACE) \
+		--create-namespace=false \
+		--wait --timeout 180s
+	kubectl -n $(NAMESPACE) get deploy,pod,svc -l app.kubernetes.io/name=gpu-telemetry-queue -o wide
+
+undeploy-queue:
+	-helm uninstall $(QUEUE_RELEASE) --namespace $(NAMESPACE)
 
 # Provision the streamer's data PVC and copy the CSV onto it, so the Streamer
 # reads it from a mounted volume at runtime. Uses a short-lived helper pod
@@ -233,6 +264,8 @@ deploy-streamer: minikube-load-streamer namespace load-streamer-data
 	helm upgrade --install $(STREAMER_RELEASE) $(STREAMER_CHART_DIR) \
 		--namespace $(NAMESPACE) \
 		--create-namespace=false \
+		--set queue.type=$(QUEUE_TYPE) \
+		--set queue.addr=$(QUEUE_ADDR) \
 		--wait --timeout 180s
 	kubectl -n $(NAMESPACE) get deploy,pod,hpa -l app.kubernetes.io/name=gpu-telemetry-streamer -o wide
 
@@ -249,8 +282,8 @@ undeploy:
 	-kubectl delete -f deploy/namespace.yaml
 
 # Tear down the whole pipeline: uninstall all releases, then delete the namespace.
-undeploy-all: undeploy-streamer undeploy-collector undeploy
-	@echo "✅ removed API + Collector + Streamer from namespace $(NAMESPACE)"
+undeploy-all: undeploy-streamer undeploy-collector undeploy-queue undeploy
+	@echo "✅ removed API + Collector + Streamer + Queue from namespace $(NAMESPACE)"
 
 # Test & coverage
 .PHONY: test cover cover-html

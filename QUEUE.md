@@ -21,11 +21,12 @@ We are building a custom, lightweight Message Queue in Go to replace Kafka. Comm
 
 We embrace an iterative approach, building a simple, working service first, and scaling its complexity progressively.
 
-### Stage 1: The MVP (Pure In-Memory Broker)
+### Stage 1: The MVP (Pure In-Memory Broker) ✅ Complete
 
 * **Goal:** Establish the gRPC API contract and network layer before introducing I/O complexities.
 * **Storage:** Pure in-memory maps and slices protected by Read/Write Mutexes. No disk I/O.
-* **Features:** Basic `Produce` (append to topic) and `Consume` (read by absolute offset).
+* **Features:** `Produce` (append to topic), `Consume` (blocking read by absolute offset), `Commit` (per-group offset acknowledgement).
+* **Status:** Running end-to-end in minikube. Streamer → gRPC Queue → Collector → TimescaleDB → API fully verified (`publish_errors: 0`, `total_dropped: 0`). See `internal/queue/server/`, `internal/queue/grpc/`, `cmd/queue/`.
 
 ### Stage 2: Shared Persistence & Smart Flushing
 
@@ -93,12 +94,51 @@ The system relies on a Pull-based architecture.
 
 ### Prerequisites
 
-* Go 1.20+
-* Protocol Buffers Compiler (`protoc`)
-* Go gRPC plugins (`protoc-gen-go`, `protoc-gen-go-grpc`)
+* Go 1.21+
+
+> **Note:** The current Stage 1 implementation uses hand-written gRPC bindings in
+> `internal/queue/grpc/api.go` rather than protoc-generated code. The proto schema
+> lives at `proto/queue.proto` for reference and future code generation. No `protoc`
+> toolchain is required to build or run the queue.
 
 ### Local Development
 
-1. Compile the protobuf file:
+1. Run the queue server (in-memory, listens on `:50051` by default):
    ```bash
-   protoc --go_out=. --go-grpc_out=. mq.proto
+   QUEUE_LISTEN_ADDR=:50051 go run ./cmd/queue/
+   ```
+
+2. Point the Streamer and Collector at it via the feature flag:
+   ```bash
+   # Streamer
+   QUEUE_TYPE=grpc QUEUE_ADDR=localhost:50051 STREAMER_CSV_PATH=... go run ./cmd/streamer/
+
+   # Collector (separate terminal)
+   QUEUE_TYPE=grpc QUEUE_ADDR=localhost:50051 go run ./cmd/collector/
+   ```
+
+3. Verify with `make build` and `make test`:
+   ```bash
+   go build ./...
+   go test -race ./...
+   ```
+
+### Kubernetes Deploy (custom queue mode)
+
+```bash
+# 1. Build + load all images into minikube
+make docker-build-queue docker-build-collector docker-build-streamer
+make minikube-load-queue minikube-load-collector minikube-load-streamer
+
+# 2. Deploy the queue, then the rest of the pipeline with QUEUE_TYPE=grpc
+make deploy-queue
+make deploy-collector QUEUE_TYPE=grpc
+make deploy-streamer  QUEUE_TYPE=grpc
+
+# Or deploy the full pipeline at once
+make deploy QUEUE_TYPE=grpc
+```
+
+The Makefile passes `QUEUE_TYPE` and `QUEUE_ADDR` via `--set` to each Helm chart, and the
+Collector/Streamer NetworkPolicies automatically open the correct egress port (9092 for
+Kafka, 50051 for gRPC) based on the `queue.type` value.

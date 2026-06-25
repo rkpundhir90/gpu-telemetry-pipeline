@@ -1,11 +1,3 @@
-// Command streamer runs the Telemetry Streamer: it loads GPU telemetry from a
-// CSV and replays it onto Kafka, stamping each datapoint with its processing
-// time.
-//
-// Horizontal scaling is coordination-free: run multiple replicas and each streams
-// the dataset independently, multiplying the telemetry rate. Because the
-// timestamp is the publish time, replicas produce distinct datapoints rather than
-// duplicates. See deploy/helm for the Deployment + HorizontalPodAutoscaler.
 package main
 
 import (
@@ -20,7 +12,9 @@ import (
 	"time"
 
 	"gpu-telemetry-pipeline/internal/config"
+	grpcqueue "gpu-telemetry-pipeline/internal/queue/grpc"
 	kafkaqueue "gpu-telemetry-pipeline/internal/queue/kafka"
+	"gpu-telemetry-pipeline/internal/queue"
 	"gpu-telemetry-pipeline/internal/streamer"
 )
 
@@ -45,15 +39,24 @@ func run(ctx context.Context, cfg config.Streamer, log *slog.Logger) error {
 	}
 	log.Info("loaded telemetry dataset", "records", len(records), "path", cfg.CSVPath)
 
-	producer, err := kafkaqueue.NewProducer(kafkaqueue.ProducerConfig{
-		Brokers: cfg.KafkaBrokers,
-		Topic:   cfg.KafkaTopic,
-	})
-	if err != nil {
-		return err
+	var producer queue.Producer
+	if cfg.QueueType == "grpc" {
+		producer, err = grpcqueue.NewProducer(cfg.QueueAddr, cfg.KafkaTopic)
+		if err != nil {
+			return err
+		}
+		log.Info("connected to gRPC queue", "addr", cfg.QueueAddr, "topic", cfg.KafkaTopic)
+	} else {
+		producer, err = kafkaqueue.NewProducer(kafkaqueue.ProducerConfig{
+			Brokers: cfg.KafkaBrokers,
+			Topic:   cfg.KafkaTopic,
+		})
+		if err != nil {
+			return err
+		}
+		log.Info("connected producer", "brokers", cfg.KafkaBrokers, "topic", cfg.KafkaTopic)
 	}
 	defer func() { _ = producer.Close() }()
-	log.Info("connected producer", "brokers", cfg.KafkaBrokers, "topic", cfg.KafkaTopic)
 
 	str := streamer.New(producer, records, streamer.Config{
 		Interval: cfg.Interval,
@@ -70,9 +73,6 @@ func run(ctx context.Context, cfg config.Streamer, log *slog.Logger) error {
 	return str.Run(ctx)
 }
 
-// startHealthServer exposes liveness (/healthz) and readiness (/readyz) probes
-// plus a stats endpoint, on a goroutine. The Streamer has no backing datastore,
-// so once it is constructed it is ready.
 func startHealthServer(addr string, stats *streamer.Stats, log *slog.Logger) *http.Server {
 	mux := http.NewServeMux()
 

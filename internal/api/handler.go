@@ -15,15 +15,13 @@ import (
 	"gpu-telemetry-pipeline/internal/telemetry"
 )
 
-// Handlers are the HTTP presentation layer: they decode requests, delegate to
-// the service (business layer), and map results/errors to HTTP responses. They
-// hold no business logic and never touch the store directly.
+// Handlers is the HTTP presentation layer: decodes requests, delegates to the
+// service, and maps results/errors to HTTP responses.
 type Handlers struct {
 	svc *service.TelemetryService
 	log *slog.Logger
 }
 
-// NewHandlers wires the handlers to the telemetry service.
 func NewHandlers(svc *service.TelemetryService, log *slog.Logger) *Handlers {
 	if log == nil {
 		log = slog.Default()
@@ -139,8 +137,7 @@ func (h *Handlers) Ready(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ready"})
 }
 
-// parseTime parses an optional RFC3339 timestamp; an empty string yields the
-// zero time (an unbounded window edge).
+// parseTime parses an optional RFC3339 timestamp; empty string → zero time (unbounded).
 func parseTime(s string) (time.Time, error) {
 	if s == "" {
 		return time.Time{}, nil
@@ -148,8 +145,7 @@ func parseTime(s string) (time.Time, error) {
 	return time.Parse(time.RFC3339, s)
 }
 
-// parseLimit parses an optional row limit. Absent yields 0 (the service applies
-// its default); a present value must be a positive integer.
+// parseLimit parses an optional row limit; absent → 0 (service applies default).
 func parseLimit(s string) (int, error) {
 	if s == "" {
 		return 0, nil
