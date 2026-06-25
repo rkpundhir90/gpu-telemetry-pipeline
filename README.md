@@ -13,13 +13,14 @@ an auto-generated OpenAPI spec.
 > Helm deployments onto minikube. This README describes **what exists today** and
 > grows as the project does.
 
-> **Custom gRPC Message Queue (Stage 1 complete).** The Collector and Streamer
-> are written against small `queue.Consumer` / `queue.Producer` interfaces so the
-> queue is a swappable implementation detail. **The custom gRPC queue is the
-> primary implementation** (`QUEUE_TYPE=grpc`, enabled by default in the Helm
-> deploy). Kafka remains available as an alternative (`QUEUE_TYPE=kafka`) and is
-> kept for comparison and compose-stack testing. The design and phased roadmap for
-> the custom queue are in [QUEUE.md](QUEUE.md).
+> **Custom gRPC Message Queue — complete.** The Collector and Streamer are written
+> against small `queue.Consumer` / `queue.Producer` interfaces so the queue is a
+> swappable implementation detail. **The custom gRPC queue is the primary
+> implementation** (`QUEUE_TYPE=grpc`, enabled by default). It uses server-streaming
+> gRPC (broker pushes batches), a bounded in-memory buffer with eviction, transparent
+> consumer reconnection, graceful shutdown, and a streamer CSV checkpoint. Kafka
+> remains available as an alternative (`QUEUE_TYPE=kafka`). Full details in
+> [QUEUE.md](QUEUE.md).
 
 ## Table of contents
 - [What's in the repo today](#whats-in-the-repo-today)
@@ -78,7 +79,7 @@ deploy/
   helm/timescaledb/              TimescaleDB Helm values (bitnami/postgresql + db-init Job)
 Makefile              build / test / coverage / deploy targets (see "Make targets")
 DECISION.md           design decisions + rationale (DB, queue, Make, Helm)
-QUEUE.md              custom gRPC message queue design (stateless broker, phased plan, smart flush)
+QUEUE.md              custom gRPC message queue — architecture, API, fault tolerance, checkpoint
 go.mod / go.sum       Go module (module gpu-telemetry-pipeline)
 project_docs/
   AI_PROMPTS.md         how AI assistance was used
@@ -94,10 +95,10 @@ README.md             this file
 - **HTTP/REST:** [Gin](https://github.com/gin-gonic/gin)
 - **OpenAPI:** [swaggo/swag](https://github.com/swaggo/swag) + gin-swagger (spec
   generated from handler annotations)
-- **Message queue:** 
-    - [Kafka](https://kafka.apache.org/) via the pure-Go [segmentio/kafka-go](https://github.com/segmentio/kafka-go) client.
-    - **Custom gRPC Queue** (MVP) utilizing `google.golang.org/grpc` for high-performance binary streaming.
-    - Both are behind `queue.Consumer` / `queue.Producer` interfaces.
+- **Message queue:**
+    - **Custom gRPC Queue** (primary) — hand-written bindings, server-streaming delivery, bounded in-memory broker, close+replace notify channel, consumer reconnection with backoff. See [QUEUE.md](QUEUE.md).
+    - [Kafka](https://kafka.apache.org/) via [segmentio/kafka-go](https://github.com/segmentio/kafka-go) — available as `QUEUE_TYPE=kafka`, used in the Compose stack.
+    - Both sit behind `queue.Consumer` / `queue.Producer` interfaces; switching is a single env var.
 - **Persistence:** [PostgreSQL](https://www.postgresql.org/) +
   [TimescaleDB](https://www.timescale.com/) via the pure-Go
   [pgx](https://github.com/jackc/pgx) driver (behind `store.TelemetryStore`
@@ -135,7 +136,8 @@ the pipeline. Each instance:
 - **`internal/queue`** — the `Consumer`/`Producer` interfaces. The Collector and
   Streamer depend only on these, never on a specific broker.
 - **`internal/queue/grpc`** — the custom gRPC queue implementation (primary, enabled
-  via `QUEUE_TYPE=grpc`; hand-written bindings, JSON codec override, in-memory broker).
+  via `QUEUE_TYPE=grpc`; hand-written bindings, server-streaming `StreamConsume`, bounded
+  in-memory broker, transparent consumer reconnection with backoff).
 - **`internal/queue/kafka`** — the Kafka implementation (consumer groups, manual
   offset commits) using the pure-Go `segmentio/kafka-go`.
 - **`internal/store`** + **`internal/store/postgres`** — the `TelemetryStore`
@@ -240,6 +242,12 @@ partition and stay ordered end-to-end. The Streamer programs against the
 `queue.Producer` interface; the **custom gRPC queue is the primary implementation**,
 with Kafka available as an alternative.
 
+**CSV checkpoint** — the streamer writes its current record index to an `emptyDir`
+volume every 500 records and on clean shutdown. If the container restarts within the
+same pod (OOM kill, crash loop), it resumes from the last saved position rather than
+replaying from record 0. A full pod eviction resets to 0 (correct: the new pod has no
+prior state). Configured via `STREAMER_CHECKPOINT_DIR`.
+
 ### Dynamic scaling (the headline requirement)
 
 Scaling is **horizontal and coordination-free**: each replica streams the full
@@ -267,6 +275,7 @@ keep pace.
 | `STREAMER_CSV_PATH` | *(required)* | Telemetry source file, read at runtime (a PV mount in k8s). |
 | `STREAMER_INTERVAL` | `10ms` | Per-replica delay between datapoints. |
 | `STREAMER_LOOP` | `true` | Replay the dataset endlessly. |
+| `STREAMER_CHECKPOINT_DIR` | *(empty)* | Directory for progress checkpoint file. Empty = disabled. In k8s set to `/checkpoint` (emptyDir). |
 | `STREAMER_HEALTH_ADDR` | `:8082` | Address for the health/stats server. |
 
 ### Health & observability
@@ -531,29 +540,18 @@ See [Deploy to minikube](#deploy-to-minikube-helm) for the full command sequence
 docker compose -f deploy/docker-compose.yaml up --build
 ```
 
-## Roadmap
+## What's complete
 
-Done:
-- ✅ **Custom gRPC Message Queue (Stage 1 MVP)** — Stateless in-memory broker implementing the `queue` interfaces, deployed via Helm.
-- ✅ **Containerisation and Kubernetes (minikube) deployment** via Helm, with a
-  security-hardened, dedicated namespace.
-- ✅ **Telemetry Streamer** — scalable CSV replayer that publishes to the queue,
-  stamping each datapoint with its processing time; reads its data from a
-  PersistentVolume at runtime; its own image, Helm chart, and HPA.
-- ✅ **Telemetry Collector** — scalable competing-consumer that parses and
-  persists telemetry, with its own image, Helm chart, and HPA.
-- ✅ **Persistence layer** — PostgreSQL/TimescaleDB behind `TelemetryStore`
-  (write) and `TelemetryReader` (read) interfaces.
-- ✅ **REST API** — reads telemetry back from TimescaleDB (`GET /api/v1/gpus`,
-  `GET /api/v1/gpus/{id}/telemetry`), with OpenAPI/Swagger.
-- ✅ **End-to-end pipeline** — Streamer $\rightarrow$ Queue $\rightarrow$ Collector $\rightarrow$ TimescaleDB $\rightarrow$ API,
-  demonstrable via Docker Compose and on minikube.
-- ✅ **Unit tests + coverage** via the Makefile (`make cover`).
-
-Remaining:
-- **Stage 2 Custom Queue**: Shared persistence (S3/EFS), smart flush algorithm (size + time + memory-pressure thresholds), Queue-vs-Log mode.
-- **Stage 3 Custom Queue**: Consumer group state (`__consumer_offsets` internal topic), per-group offset tracking.
-- **Stage 4 Custom Queue**: In-memory peer replication, Metadata Raft cluster, failover for high availability.
+- ✅ **Custom gRPC Message Queue** — server-streaming broker (hand-written bindings, no protoc); bounded in-memory buffer with eviction; close+replace notify channel (no goroutine per consumer call); graceful shutdown; HTTP health+stats endpoint; TLS; deployed via Helm.
+- ✅ **Streamer CSV checkpoint** — `emptyDir`-backed progress file; pod restarts resume mid-dataset rather than replaying from record 0.
+- ✅ **Consumer fault tolerance** — exponential backoff reconnection, `waitForReady`, producer retry; pipeline survives broker pod restarts without dropping records.
+- ✅ **Containerisation and Kubernetes (minikube) deployment** via Helm, with a security-hardened dedicated namespace (restricted PSA, NetworkPolicies via Calico, drop-all capabilities, read-only root fs).
+- ✅ **Telemetry Streamer** — scalable CSV replayer, stamping each datapoint with publish time; PersistentVolume data source; Helm chart with HPA.
+- ✅ **Telemetry Collector** — scalable competing-consumer, at-least-once delivery with idempotent inserts; Helm chart with HPA.
+- ✅ **Persistence** — PostgreSQL/TimescaleDB behind `TelemetryStore` (write) and `TelemetryReader` (read) interfaces.
+- ✅ **REST API** — `GET /api/v1/gpus`, `GET /api/v1/gpus/{id}/telemetry`, OpenAPI/Swagger.
+- ✅ **End-to-end pipeline** — Streamer → Queue → Collector → TimescaleDB → API, on minikube and Docker Compose.
+- ✅ **Unit tests + coverage** — `make test` / `make cover`.
 
 ## AI assistance
 
