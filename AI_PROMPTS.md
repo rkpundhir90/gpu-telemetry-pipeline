@@ -248,3 +248,86 @@ full build/deploy lifecycle.
     port 50051 instead. The queue chart had no NetworkPolicy at all. Both were
     fixed: Collector/Streamer NetworkPolicies are now conditional on `queue.type`,
     and the queue chart has its own allow rule for gRPC ingress.
+
+---
+
+### 10. Ring buffer & dispatcher pipeline (custom queue)
+
+> "There are merge conflicts in my current branch after merge with master. While
+> resolving merge conflicts make sure you take the incoming change from master as
+> priority."
+
+> "Revolutionize the custom queue implementation with in-memory taking care of
+> scalability and fault-tolerance with adding much complexities, it should be
+> fast, messages should be delivered and increase throughput of the consumers
+> and add in the go concurrency concepts like channels, goroutines to maximise
+> the performance."
+
+> "Skip the partitioning for now, incorporate only those changes which don't
+> break the api, implement the other two."
+
+From these the assistant:
+- Resolved 6 merge conflict files, taking master's versions for Helm/TLS files while keeping the branch versions of `internal/queue/grpc/client.go` and `cmd/queue/main.go`, which already included master's TLS additions and the streaming consumer the branch had introduced
+- Replaced the growable `[]Message` slice with batch-copy eviction with a **true O(1) ring buffer** — fixed-size circular array, one-slot eviction per overflow write, flat memory with no allocation spikes
+- Added a **dispatcher goroutine pipeline** to `StreamConsume` — a dispatcher goroutine pre-fetches ring batches into a depth-4 channel while the main goroutine encodes and sends, so ring reads and network writes overlap rather than serialise
+- Rewrote `broker_test.go` with tests matching the new ring semantics (`TestRing_EvictsOneAtATime`, `TestRing_ConsumerReset`, `TestRing_OffsetContinuity`, `TestRing_ValidOffsetPreserved`, blocking/unblocking tests)
+
+## Where AI fell short (ring buffer & pipeline session)
+
+**During the ring buffer and dispatcher pipeline build**
+
+23. **Partitioning rejected as premature.** The assistant began designing a
+    partitioned broker with per-partition locks, a `groupRegistry`, and new
+    `MemberId`/`Partition` fields in the gRPC API. The human stopped it: the real
+    bottleneck is `stream.Send` blocking ring reads (addressed by the dispatcher
+    pipeline), not mutex contention on a single topic, and adding partitioning
+    would break the existing API. The assistant had overshot the scope.
+
+24. **Test compilation failures after broker rewrite.** The old tests referenced
+    `topic.baseOffset`, `topic.messages`, and `ts.HeadOffset` — all renamed or
+    removed in the ring buffer rewrite. The tests had to be fully rewritten to
+    match the new field names (`base`, `Head`) and per-message eviction semantics.
+
+---
+
+### 11. Development workflow automation
+
+The following prompts represent repeatable workflow patterns used throughout this
+project for managing branches, merges, and end-to-end validation.
+
+#### Automatic PR creation
+
+> "Create a pull request for this branch into master. Title: [title]. Include a
+> summary of what changed and a test plan."
+
+The assistant inspects `git log` and `git diff` for the branch, drafts a PR
+description that covers the motivation, key design decisions, and a checklist of
+test steps, then runs `gh pr create` with the body passed via a heredoc.
+
+#### Resolving merge conflicts
+
+> "There are merge conflicts in my current branch after merging with master.
+> While resolving merge conflicts make sure you take the incoming change from
+> master as priority."
+
+The assistant lists all conflicted files with `git diff --name-only --diff-filter=U`,
+inspects each conflict to understand whether master's version is safe to take
+wholesale (using `git checkout --theirs`), and restores branch-specific files
+(`git checkout HEAD --`) where master's version references code the branch has
+already removed or replaced. All resolutions are verified with `go build ./...`
+before staging.
+
+#### Merge after unit testing, deploy to minikube, and verify API
+
+> "Run the unit tests — if they all pass, merge this branch into master, rebuild
+> and redeploy the affected services on minikube, and confirm the API is
+> returning correct data."
+
+The assistant executes this as a gated sequence:
+
+1. `go test -race ./...` — full suite with race detector; stops if any test fails
+2. `git checkout master && git merge --no-ff [branch]` — merge only on green
+3. `make docker-build-<service> && make minikube-load-<service>` — rebuild changed images
+4. `kubectl rollout restart deployment/<name> -n gpu-telemetry` — force pods to pick up the new image (required because `imagePullPolicy: IfNotPresent` with the same tag does not trigger an automatic pull)
+5. `kubectl rollout status deployment/<name> -n gpu-telemetry` — wait for rollout to complete
+6. `curl -s $(make service-url)/api/v1/gpus | jq` — hit the live API and confirm a non-empty, correctly-shaped JSON response
