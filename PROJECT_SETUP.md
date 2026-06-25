@@ -90,43 +90,73 @@ Queue $\rightarrow$ Collector $\rightarrow$ TimescaleDB $\rightarrow$ API).
 
 ## 12. Run the whole pipeline
 
-- **Local (Compose):** `docker compose -f deploy/docker-compose.yaml up --build`
-  brings up Kafka + TimescaleDB + Streamer + Collector + API; query it at
-  `http://localhost:8080/api/v1/gpus`. Scale with
-  `--scale streamer=3 --scale collector=3`.
-- **minikube:** a single `make deploy` orchestrates the full sequence:
-  `deploy-timescaledb` $\rightarrow$ `deploy-queue` (Custom gRPC) $\rightarrow$ `deploy-collector` $\rightarrow$ `deploy-streamer` $\rightarrow$ `deploy-api`.
+### Local (Docker Compose — always Kafka)
+
+```bash
+docker compose -f deploy/docker-compose.yaml up --build
+```
+
+Brings up Kafka + TimescaleDB + Streamer + Collector + API. Query at
+`http://localhost:8080/api/v1/gpus`. Scale with:
+
+```bash
+docker compose -f deploy/docker-compose.yaml up --build --scale streamer=3 --scale collector=3
+```
+
+### minikube — one command
+
+**Custom gRPC queue (recommended):**
+```bash
+make deploy QUEUE_TYPE=grpc
+```
+
+**Kafka:**
+```bash
+make deploy-kafka && make deploy QUEUE_TYPE=kafka
+```
+
+### minikube — step by step
+
+Both modes share the same first two steps:
+
+```bash
+make setup-infra       # install Docker, minikube, kubectl, Helm (Ubuntu/Debian; skip if already installed)
+make start-minikube    # start cluster with Calico CNI (required for NetworkPolicy enforcement)
+```
+
+**Custom gRPC queue:**
+
+| Step | Command | What it does |
+|---|---|---|
+| 1 | `make deploy-timescaledb` | Installs bitnami/postgresql + db-init Job (creates schema, enables TimescaleDB extension) |
+| 2 | `make deploy-queue` | Builds gRPC queue image, loads into minikube, installs Helm chart |
+| 3 | `make deploy-collector QUEUE_TYPE=grpc` | Builds collector image, loads into minikube, installs chart + HPA |
+| 4 | `make deploy-streamer QUEUE_TYPE=grpc` | Loads CSV onto PVC, builds streamer image, loads into minikube, installs chart + HPA |
+| 5 | `make deploy-api` | Builds API image, loads into minikube, installs Helm chart |
+
+**Kafka:**
+
+| Step | Command | What it does |
+|---|---|---|
+| 1 | `make deploy-timescaledb` | Same as above |
+| 2 | `make deploy-kafka` | Deploys Kafka as a KRaft StatefulSet (no Zookeeper) |
+| 3 | `make deploy-collector` | Builds collector image, loads into minikube, installs chart + HPA (`QUEUE_TYPE=kafka` is the default) |
+| 4 | `make deploy-streamer` | Loads CSV onto PVC, builds streamer image, loads into minikube, installs chart + HPA |
+| 5 | `make deploy-api` | Builds API image, loads into minikube, installs Helm chart |
+
+After deploying:
+
+```bash
+make status       # show all pods, services, networkpolicies in the namespace
+make service-url  # print the URL to reach the API (keep this process running for Windows access)
+```
 
 ## 13. Switching between Kafka and the custom gRPC queue
 
 The queue implementation is selected at deploy time via `QUEUE_TYPE`. Only the
-relevant env vars are used; the other broker's settings are ignored.
+selected broker's env vars are used; the other's are ignored.
 
-| `QUEUE_TYPE` | Queue pod needed | Kafka needed | Key env vars |
+| `QUEUE_TYPE` | Queue pod needed | Kafka pod needed | Key env vars |
 |---|---|---|---|
-| `grpc` (default in `make deploy`) | yes (`deploy-queue`) | no | `QUEUE_ADDR=gpu-telemetry-queue:50051` |
-| `kafka` | no | yes (`deploy-kafka`) | `KAFKA_BROKERS=kafka:9092` |
-
-**Run against the custom gRPC queue (minikube):**
-```bash
-make deploy                          # QUEUE_TYPE=grpc is the Makefile default
-# or explicitly:
-make deploy QUEUE_TYPE=grpc
-```
-
-**Run against Kafka (minikube):**
-```bash
-make deploy-timescaledb
-make deploy-kafka                    # raw StatefulSet, not a Helm chart
-make deploy-collector                # QUEUE_TYPE=kafka is the env default
-make deploy-streamer
-make deploy-api
-# or all at once:
-make deploy QUEUE_TYPE=kafka
-```
-
-**Run against Kafka locally (Compose — always Kafka):**
-```bash
-docker compose -f deploy/docker-compose.yaml up --build
-```
-The Compose stack wires Kafka directly; `QUEUE_TYPE` is not needed.
+| `grpc` | yes (`make deploy-queue`) | no | `QUEUE_ADDR=gpu-telemetry-queue:50051` |
+| `kafka` | no | yes (`make deploy-kafka`) | `KAFKA_BROKERS=kafka:9092` |

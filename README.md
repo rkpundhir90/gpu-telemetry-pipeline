@@ -30,7 +30,7 @@ an auto-generated OpenAPI spec.
 - [OpenAPI / Swagger](#openapi--swagger)
 - [Reference data](#reference-data)
 - [Build](#build)
-- [Container image](#container-image)
+- [Container images](#container-images)
 - [Deploy to minikube (Helm)](#deploy-to-minikube-helm)
 - [Security](#security)
 - [Accessing the service](#accessing-the-service)
@@ -394,46 +394,48 @@ make start-minikube                              # docker driver + Calico
 # running minikube as root? add: MINIKUBE_EXTRA_ARGS=--force
 ```
 
-Deploy everything with one target — it builds the image, loads it into the
-cluster, creates the hardened namespace, lints the chart, and installs the
-release:
+### One command
 
+**Custom gRPC queue (recommended):**
 ```bash
-make deploy
+make deploy QUEUE_TYPE=grpc
 ```
 
-This runs, in order:
-
-1. `make minikube-load` — `docker build` then `minikube image load` (the image
-   is local-only, so the chart uses `imagePullPolicy: IfNotPresent`).
-2. `make namespace` — applies [`deploy/namespace.yaml`](deploy/namespace.yaml),
-   a dedicated `gpu-telemetry` namespace labelled for the **restricted** Pod
-   Security Standard. This is created up-front because Helm writes its release
-   secret into the target namespace before applying manifests.
-3. `make deploy-timescaledb` — installs `bitnami/postgresql` with the
-   TimescaleDB image (`timescale/timescaledb:latest-pg15`) and immediately runs a
-   post-install Kubernetes Job ([`db-init-job.yaml`](deploy/helm/timescaledb/db-init-job.yaml))
-   that idempotently creates the `telemetry` database and enables the TimescaleDB
-   extension. The Job uses the application user (`telemetry`) rather than the
-   Postgres superuser, because the superuser password in the Bitnami secret drifts
-   when the PVC is reused across Helm releases.
-4. `make deploy-queue` — builds + loads the custom gRPC queue image and installs
-   the chart (`deploy/helm/gpu-telemetry-queue`).
-5. `make deploy-collector` — builds + loads the Collector image, then installs
-   the Collector chart (Deployment + HPA).
-6. `make deploy-streamer` — provisions the data PVC, copies the CSV onto it,
-   builds + loads the Streamer image, then installs the Streamer chart (Deployment + HPA).
-7. `make deploy-api` — builds + loads the API image, then `helm lint` +
-   `helm upgrade --install … --wait` installs the
-   [API chart](deploy/helm/gpu-telemetry-api/) into that namespace.
-
-Check what's running:
-
+**Kafka:**
 ```bash
-make status        # deploy/pods/svc/networkpolicy/sa + namespace labels
+make deploy-kafka && make deploy QUEUE_TYPE=kafka
 ```
 
-Tear it down with `make undeploy`.
+### Step by step
+
+| Step | Command | What it does |
+|---|---|---|
+| 1 | `make deploy-timescaledb` | Installs bitnami/postgresql + db-init Job (creates `telemetry` DB, enables TimescaleDB extension) |
+| 2a *(gRPC)* | `make deploy-queue` | Builds gRPC queue image, loads into minikube, installs Helm chart + Service |
+| 2b *(Kafka)* | `make deploy-kafka` | Deploys Kafka as a KRaft StatefulSet (no Zookeeper) |
+| 3 | `make deploy-collector QUEUE_TYPE=grpc` | Builds collector image, loads into minikube, installs chart + HPA |
+| 4 | `make deploy-streamer QUEUE_TYPE=grpc` | Loads CSV onto PVC, builds streamer image, loads into minikube, installs chart + HPA |
+| 5 | `make deploy-api` | Builds API image, loads into minikube, installs Helm chart |
+
+> For Kafka, omit `QUEUE_TYPE=grpc` from steps 3–4 (or pass `QUEUE_TYPE=kafka` explicitly) — `kafka` is the binary default.
+
+Each `deploy-*` target builds the Docker image, loads it into minikube
+(`imagePullPolicy: IfNotPresent`), creates the hardened `gpu-telemetry` namespace
+if absent, and runs `helm upgrade --install --wait`.
+
+Check what's running after deploy:
+
+```bash
+make status        # pods, services, networkpolicies, namespace labels
+make service-url   # print the URL for the API (keep this process running for Windows access)
+```
+
+Tear it down:
+
+```bash
+make undeploy-all  # remove all releases + namespace
+make undeploy      # remove API release + namespace only
+```
 
 ## Security
 
@@ -515,34 +517,16 @@ so no extra configuration is needed.
 
 ## Switching between Kafka and the custom gRPC queue
 
-Both implementations are available at runtime via the `QUEUE_TYPE` environment
-variable. Only the selected broker's env vars are used; the other's are ignored.
+The queue is selected via `QUEUE_TYPE`. Only the active broker's settings are used.
 
-| `QUEUE_TYPE` | Queue pod needed | Kafka needed | Key env vars |
-|---|---|---|---|
-| `grpc` (Makefile default) | yes (`make deploy-queue`) | no | `QUEUE_ADDR=gpu-telemetry-queue:50051` |
-| `kafka` | no | yes (`make deploy-kafka`) | `KAFKA_BROKERS=kafka:9092` |
+| `QUEUE_TYPE` | Pod needed | Key env var |
+|---|---|---|
+| `grpc` | `make deploy-queue` | `QUEUE_ADDR=gpu-telemetry-queue:50051` |
+| `kafka` | `make deploy-kafka` | `KAFKA_BROKERS=kafka:9092` |
 
-### Custom gRPC queue (default)
+See [Deploy to minikube](#deploy-to-minikube-helm) for the full command sequences.
 
-```bash
-make deploy                   # QUEUE_TYPE=grpc is already the Makefile default
-```
-
-### Kafka
-
-**minikube:**
-```bash
-make deploy-timescaledb
-make deploy-kafka             # raw StatefulSet — not a Helm chart
-make deploy-collector         # QUEUE_TYPE=kafka is the binary default
-make deploy-streamer
-make deploy-api
-# or in one shot:
-make deploy QUEUE_TYPE=kafka
-```
-
-**Docker Compose (always Kafka — no flag needed):**
+**Docker Compose always runs Kafka** — no flag needed:
 ```bash
 docker compose -f deploy/docker-compose.yaml up --build
 ```
@@ -575,4 +559,4 @@ Remaining:
 
 This repository's initial structure was scaffolded with Claude Code. A detailed
 account of the prompts used and where AI needed manual intervention is in
-[`project_docs/AI_PROMPTS.md`](project_docs/AI_PROMPTS.md).
+[`AI_PROMPTS.md`](AI_PROMPTS.md).
