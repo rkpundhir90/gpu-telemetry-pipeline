@@ -12,6 +12,16 @@ service:
 env:
   QUEUE_LISTEN_ADDR: ":50051"
 
+# Per-topic buffer cap; oldest quarter evicted when full, lagging consumers reset to new base.
+maxMessages: 10000
+
+healthPort: 8083
+
+# gRPC TLS. Secret must contain tls.crt + tls.key. Run 'make gen-tls-certs' to create it.
+# Empty = no TLS (local dev only).
+tls:
+  secretName: gpu-telemetry-queue-tls
+
 resources:
   limits:
     cpu: 100m

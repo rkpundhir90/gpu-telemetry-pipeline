@@ -67,8 +67,9 @@ type Streamer struct {
 	// CSVPath is the telemetry source file, read at runtime (PV mount in k8s).
 	CSVPath string
 
-	Interval time.Duration
-	Loop     bool
+	Interval      time.Duration
+	Loop          bool
+	CheckpointDir string // emptyDir mount; empty disables checkpointing
 
 	HealthAddr string
 }
@@ -80,9 +81,10 @@ func StreamerConfig() Streamer {
 		KafkaBrokers: splitAndTrim(getenv("KAFKA_BROKERS", "localhost:9092")),
 		KafkaTopic:   getenv("KAFKA_TOPIC", "gpu-telemetry"),
 
-		CSVPath:  getenv("STREAMER_CSV_PATH", ""),
-		Interval: getenvDuration("STREAMER_INTERVAL", 10*time.Millisecond),
-		Loop:     getenvBool("STREAMER_LOOP", true),
+		CSVPath:       getenv("STREAMER_CSV_PATH", ""),
+		Interval:      getenvDuration("STREAMER_INTERVAL", 10*time.Millisecond),
+		Loop:          getenvBool("STREAMER_LOOP", true),
+		CheckpointDir: getenv("STREAMER_CHECKPOINT_DIR", ""),
 
 		HealthAddr: getenv("STREAMER_HEALTH_ADDR", ":8082"),
 	}

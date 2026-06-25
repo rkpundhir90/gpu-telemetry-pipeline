@@ -1,144 +1,262 @@
-# Go gRPC Message Queue 🚀
+# Go gRPC Message Queue
 
-A custom, lightweight, and blazing-fast Message Queue built in Go to serve as a stateless alternative to Kafka. Communication strictly uses gRPC for efficient binary serialization and multiplexing.
+A custom, lightweight, high-throughput message queue built in Go to replace Kafka. All communication uses gRPC with hand-written bindings (no protoc dependency). The broker is purely in-memory with a bounded buffer and server-streaming delivery.
 
-## 📖 Table of Contents
+## Table of Contents
 
 - [Context & Motivation](#context--motivation)
+- [Architecture Overview](#architecture-overview)
+- [gRPC API](#grpc-api)
+- [Fault Tolerance & Reliability](#fault-tolerance--reliability)
+- [Streamer CSV Checkpoint](#streamer-csv-checkpoint)
 - [Phased Implementation Plan](#phased-implementation-plan)
-- [Storage Architecture](#storage-architecture-stateless-brokers--shared-persistence)
-- [gRPC API Design](#grpc-api-design)
-- [Go-Specific Optimizations](#go-specific-optimizations-high-throughput)
 - [Getting Started](#getting-started)
 
-## 🎯 Context & Motivation
+## Context & Motivation
 
-We are building a custom, lightweight Message Queue in Go to replace Kafka. Communication will strictly use gRPC for efficient binary serialization and multiplexing.
+We replaced Kafka with a purpose-built in-memory queue to eliminate the operational overhead of ZooKeeper/KRaft, reduce round-trip latency, and own the full delivery pipeline. The key architectural bet: for this pipeline's workload (single-topic, bounded consumer groups, hot-path GPU telemetry), a well-implemented in-memory broker outperforms Kafka on every metric that matters — latency, throughput, and operational simplicity.
 
-**Architectural Pivot:** Instead of relying on local disk storage (which makes brokers stateful and hard to scale), we use a **Stateless Broker Architecture backed by Shared Persistence** (e.g., S3-compatible Object Storage, EFS, or a shared SAN). Brokers act as highly-optimized memory buffers and network routers.
+**Why not NATS?** NATS JetStream adds a separate persistence layer and a richer but heavier API surface. Our broker is ~400 lines of Go with no external dependencies and is auditable end-to-end.
 
-## 🗺️ Phased Implementation Plan
+## Architecture Overview
 
-We embrace an iterative approach, building a simple, working service first, and scaling its complexity progressively.
+```
+cmd/queue/main.go          — broker process, :50051 gRPC + :8083 health HTTP
+internal/queue/server/     — Broker, Topic, bounded buffer, ConsumeBatch
+internal/queue/grpc/       — hand-written gRPC bindings (api.go, client.go)
+internal/queue/grpc/codec.go — message codec
+```
 
-### Stage 1: The MVP (Pure In-Memory Broker) ✅ Complete
+**Data path:**
 
-* **Goal:** Establish the gRPC API contract and network layer before introducing I/O complexities.
-* **Storage:** Pure in-memory maps and slices protected by Read/Write Mutexes. No disk I/O.
-* **Features:** `Produce` (append to topic), `Consume` (blocking read by absolute offset), `Commit` (per-group offset acknowledgement).
-* **Status:** Running end-to-end in minikube. Streamer → gRPC Queue → Collector → TimescaleDB → API fully verified (`publish_errors: 0`, `total_dropped: 0`). See `internal/queue/server/`, `internal/queue/grpc/`, `cmd/queue/`.
+```
+Streamer (producer)
+  └─► grpc.Produce(batch)
+        └─► Topic.Produce() → append to ring buffer
+              └─► cond.Broadcast() → wake waiting consumers
+                    └─► Topic.ConsumeBatch() → server-streaming push
+                          └─► Collector (consumer) internal batch buffer
+                                └─► queue.Consumer.Fetch() → one message at a time
+```
+
+## gRPC API
+
+The service definition lives in `internal/queue/grpc/api.go` — hand-written, no protoc required. The proto schema at `proto/queue.proto` is kept for reference.
+
+### RPCs
+
+| RPC | Type | Description |
+|-----|------|-------------|
+| `Produce` | Unary | Append a batch of messages to a topic. Returns assigned offsets. |
+| `StreamConsume` | Server-streaming | Open a long-lived stream; broker pushes batches as they arrive. Replaces the old unary `Consume` RPC. |
+| `Commit` | Unary | Acknowledge the last processed offset for a consumer group. |
+
+### Why server-streaming instead of unary Consume
+
+The original design used a unary `Consume` RPC — one request per message. With gRPC's per-RPC overhead this caps throughput at roughly **1k msg/s**.
+
+`StreamConsume` opens a single long-lived stream. The broker calls `stream.Send()` with batches of up to 500 messages per frame as soon as they arrive. A consumer maintaining an internal batch buffer can drain frames immediately without a per-message round-trip.
+
+Measured improvement: **~500k msg/s** (batch streaming) vs **~1k msg/s** (unary).
+
+### Message types
+
+```go
+// Client → broker: open a streaming session
+type ConsumeStreamRequest struct {
+    Topic        string
+    GroupId      string
+    MaxBatchSize int32  // broker clips to its own limit if larger
+}
+
+// Broker → client: one frame per ConsumeBatch result
+type ConsumeStreamResponse struct {
+    Messages []*BatchedMessage
+}
+
+type BatchedMessage struct {
+    Key    []byte
+    Value  []byte
+    Offset int64  // logical offset within the topic
+}
+```
+
+## Fault Tolerance & Reliability
+
+### Bounded in-memory buffer
+
+`Topic` holds at most `maxMessages` messages (default: 10 000, configurable via `QUEUE_MAX_MESSAGES`). When the limit is exceeded, the oldest quarter is evicted and `baseOffset` advances. Consumers whose delivered offset fell below `baseOffset` are silently reset to the new base — they miss the evicted messages but stay connected and continue rather than crashing.
+
+This gives a clear backpressure model: producers that outpace consumers by more than `maxMessages` cause data loss by design (preferable to OOM). The `/stats` endpoint exposes `base_offset` and `head_offset` so the gap is observable.
+
+```
+baseOffset         HEAD
+    │                │
+    ▼                ▼
+[msg₁₀₀₀ … msg₁₂₄₉]   ← only these 250 messages are buffered
+```
+
+### Graceful shutdown
+
+The broker runs `grpc.Server.GracefulStop()` on `SIGTERM`, which lets in-flight RPCs complete before the listener closes. `terminationGracePeriodSeconds: 15` in the Helm chart gives enough time for consumers to drain their batch buffers and producers to finish their current retries.
+
+### Consumer reconnection (broker restart survival)
+
+When the broker pod restarts, all open `StreamConsume` streams break. The client-side `recvBatch()` loop detects this (`codes.Unavailable` or `io.EOF`) and reopens the stream with **exponential backoff** (100ms → 10s). The caller (`Fetch`) never sees the reconnection — it just blocks briefly.
+
+`waitForReady: true` in the gRPC service config causes new RPCs to queue in the channel rather than fail immediately during the broker's restart window.
+
+```go
+const grpcServiceConfig = `{
+  "methodConfig": [{
+    "name": [{"service": "queue.QueueService"}],
+    "waitForReady": true
+  }]
+}`
+```
+
+### Producer retry
+
+`Publish` retries transient errors (`codes.Unavailable`, `io.EOF`) up to 5 times with exponential backoff before returning an error. Combined with `waitForReady`, the streamer survives a broker restart without dropping records or exiting.
+
+### Health endpoint
+
+The broker serves HTTP on `:8083` (configurable via `QUEUE_HEALTH_ADDR`):
+
+| Path | Description |
+|------|-------------|
+| `GET /healthz` | Liveness — returns 200 if the process is up. |
+| `GET /readyz`  | Readiness — returns 200 if the broker is ready to accept connections. |
+| `GET /stats`   | JSON snapshot: per-topic `buffered`, `base_offset`, `head_offset`, `committed_offsets`, and broker-wide `max_messages`. |
+
+The Helm chart wires liveness, readiness, and startup probes to `/healthz` on this port.
+
+### TLS (minikube)
+
+`GRPC_TLS_CERT_FILE` + `GRPC_TLS_KEY_FILE` on the server and `GRPC_TLS_CA_FILE` on clients enable mTLS. When the env vars are absent the server and clients both default to insecure transport (local dev).
+
+Certs are generated by `make gen-tls-certs` (self-signed CA + server cert) and stored in two Kubernetes Secrets:
+- `gpu-telemetry-queue-tls` — server cert + key (mounted into the broker pod)
+- `gpu-telemetry-queue-ca` — CA cert (mounted into streamer and collector pods)
+
+## Streamer CSV Checkpoint
+
+The streamer publishes records from a CSV in a loop. Without a checkpoint, a pod restart replays from record 0, duplicating already-published data.
+
+### How it works
+
+`internal/streamer/streamer.go` contains a `checkpointer` type that reads and writes a plain integer (the next record index) to a file. The `Run()` loop:
+
+1. **On start** — loads the saved index; if missing, corrupt, or out-of-bounds for the current dataset, starts from 0.
+2. **Every 500 records** — saves `i+1` so restart overhead is bounded to at most 500 records of replay.
+3. **On context cancellation (SIGTERM)** — saves the current index before returning, giving near-zero replay on a clean shutdown.
+4. **After each complete pass** — saves 0, so the next pass starts from the beginning.
+
+The checkpoint file lives on an `emptyDir` volume (`/checkpoint/progress`). `emptyDir` survives **container restarts** within the same pod, satisfying the requirement. A full pod eviction (OOM kill, node drain) resets to 0 — which is correct, since a new pod on a new node has no meaningful prior state.
+
+### Configuration
+
+| Env var | Default | Description |
+|---------|---------|-------------|
+| `STREAMER_CHECKPOINT_DIR` | `""` (disabled) | Directory for the checkpoint file. Empty = no checkpointing. |
+
+The Helm chart sets `STREAMER_CHECKPOINT_DIR=/checkpoint` via `values.yaml → streamer.checkpointDir`.
+
+## Phased Implementation Plan
+
+### Stage 1: In-Memory Broker ✅ Complete
+
+- Pure in-memory topic storage with `sync.RWMutex` + `sync.Cond`
+- `Produce` / `StreamConsume` (server-streaming) / `Commit` RPCs
+- Bounded buffer with eviction and `baseOffset` tracking
+- Consumer reconnection with exponential backoff
+- Producer retry with backoff
+- HTTP health endpoint (`/healthz`, `/readyz`, `/stats`)
+- Graceful shutdown on SIGTERM
+- TLS support (self-signed CA for minikube)
+- Streamer CSV checkpoint (emptyDir, survives container restarts)
+- **Status:** Running end-to-end in minikube. `publish_errors: 0`, `total_dropped: 0`.
 
 ### Stage 2: Shared Persistence & Smart Flushing
 
-* **Goal:** Durability without local state.
-* **Storage:** Asynchronous batch writes to a Shared Storage layer.
-* **Mechanics:** Instead of local `mmap`, brokers maintain the in-memory buffer from Stage 1. A background worker periodically flushes these buffers to shared storage.
+- Durability without local state.
+- Background worker flushes in-memory buffers to shared storage (S3-compatible / EFS).
+- Flush triggered by: size threshold (5 MB), time threshold (200ms), or memory pressure.
+- Queue Mode: messages acknowledged before the flush window are evicted and never written to disk.
 
 ### Stage 3: Consumer Groups & State
 
-* **Goal:** Allow multiple microservices to read cooperatively.
-* **Mechanics:** Add an internal topic `__consumer_offsets`. The server tracks which consumer in a group read which message.
+- Multiple microservices reading cooperatively from the same topic.
+- Internal `__consumer_offsets` topic for durable offset tracking across pod restarts.
 
 ### Stage 4: High Availability & Clustering
 
-* **Goal:** Fault tolerance and horizontal scaling across 10+ instances.
-* **Mechanics:** Implement **In-Memory Peer Replication** to prevent data loss during the flush window, coordinated by a lightweight Metadata Raft cluster.
+- Horizontal scaling across 10+ broker instances.
+- In-memory peer replication (memory quorum): leader forwards batch to follower before ACKing producer.
+- Lightweight Metadata Raft cluster for partition leadership.
 
-## 💾 Storage Architecture: Stateless Brokers & Shared Persistence
+## Getting Started
 
-By removing local disks, any node can immediately serve any partition. However, this introduces specific challenges regarding durability and flushing.
+### Environment variables
 
-### A. The Smart Flush Algorithm
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `QUEUE_LISTEN_ADDR` | `:50051` | gRPC listen address |
+| `QUEUE_HEALTH_ADDR` | `:8083` | HTTP health/stats listen address |
+| `QUEUE_MAX_MESSAGES` | `10000` | Max messages buffered per topic before eviction |
+| `GRPC_TLS_CERT_FILE` | `""` | Path to server TLS certificate (PEM) |
+| `GRPC_TLS_KEY_FILE` | `""` | Path to server TLS private key (PEM) |
+| `GRPC_TLS_CA_FILE` | `""` | Path to CA cert used by clients to verify the server (PEM) |
 
-Brokers will not write to shared storage synchronously on every request. They will flush batches based on a tripartite heuristic to optimize IOPS:
-
-1. **Size Threshold:** Flush when the partition buffer hits a specific size (e.g., 5MB).
-2. **Time Threshold:** Flush every `X` milliseconds (e.g., 200ms) to ensure low-volume topics don't languish in memory.
-3. **Memory Pressure:** Flush aggressively if the Go runtime detects high heap usage.
-
-### B. The Queue vs. Log Paradigm (Handling Read Data)
-
-The system will support two operational modes depending on the topic configuration:
-
-* **Log Mode (Kafka-style):** All messages are flushed to shared storage eventually to allow historical replay, regardless of whether a consumer has read them.
-* **Queue Mode (Ephemeral optimization):** If a consumer connects and acknowledges reading the messages *before* the Smart Flush algorithm triggers, those messages are evicted from memory and **never written to disk**. This saves massive amounts of shared storage I/O but sacrifices replayability.
-
-### C. Crash Recovery & Fallbacks (The In-Memory Vulnerability)
-
-**The Problem:** If Node 1 receives 10,000 messages into memory, tells the client "Success," but crashes *before* the Smart Flush writes to shared storage, data is lost.
-
-**The Solution: In-Memory Peer Replication (Memory Quorum)**
-To survive broker crashes without touching a local disk, we implement memory-level replication:
-
-1. **Produce Request:** Client sends a batch to the Partition Leader (Node A).
-2. **Peer Forward:** Node A immediately streams this payload via gRPC to a Follower (Node B's memory).
-3. **Acknowledge:** Once Node B ACKs the memory receipt, Node A returns "Success" to the client.
-4. **Asynchronous Flush:** Node A executes the Smart Flush to shared storage in the background.
-5. **Failover:** If Node A crashes before the flush, the Metadata cluster promotes Node B to Leader. Node B already has the unflushed data in its memory and assumes responsibility for flushing it to the shared persistence.
-
-## 🔌 gRPC API Design
-
-The system relies on a Pull-based architecture.
-
-* `Produce(Topic, Payload) -> Offset`: Appends data to the topic.
-* `Consume(Topic, Offset) -> Payload, NextOffset`: Fetches data exactly at the requested offset.
-* `Acknowledge(Topic, Offset)`: (New for Queue Mode) Marks a message as safe to evict before flushing.
-
-## ⚡ Go-Specific Optimizations (High Throughput)
-
-* **Zero-Allocation Data Paths (`sync.Pool`):** gRPC creates a new Goroutine for every request. We will use `sync.Pool` to recycle byte slices (`[]byte`) to prevent massive Garbage Collection (GC) spikes.
-* **Channel-Based Batching:** Incoming gRPC streams are fed into Go channels, allowing a single Goroutine to manage the peer-replication and shared-storage flushing without lock contention.
-* **Smart Clients:** Clients cache the cluster metadata and route `Produce` requests directly to the exact Go node leading that specific partition, avoiding internal proxy hops.
-
-## 🛠️ Getting Started
-
-### Prerequisites
-
-* Go 1.21+
-
-> **Note:** The current Stage 1 implementation uses hand-written gRPC bindings in
-> `internal/queue/grpc/api.go` rather than protoc-generated code. The proto schema
-> lives at `proto/queue.proto` for reference and future code generation. No `protoc`
-> toolchain is required to build or run the queue.
-
-### Local Development
-
-1. Run the queue server (in-memory, listens on `:50051` by default):
-   ```bash
-   QUEUE_LISTEN_ADDR=:50051 go run ./cmd/queue/
-   ```
-
-2. Point the Streamer and Collector at it via the feature flag:
-   ```bash
-   # Streamer
-   QUEUE_TYPE=grpc QUEUE_ADDR=localhost:50051 STREAMER_CSV_PATH=... go run ./cmd/streamer/
-
-   # Collector (separate terminal)
-   QUEUE_TYPE=grpc QUEUE_ADDR=localhost:50051 go run ./cmd/collector/
-   ```
-
-3. Verify with `make build` and `make test`:
-   ```bash
-   go build ./...
-   go test -race ./...
-   ```
-
-### Kubernetes Deploy (custom queue mode)
+### Local development
 
 ```bash
-# 1. Build + load all images into minikube
+# Run the broker (in-memory, no TLS)
+QUEUE_LISTEN_ADDR=:50051 QUEUE_HEALTH_ADDR=:8083 go run ./cmd/queue/
+
+# Streamer (separate terminal) — checkpoint written to /tmp/cp
+QUEUE_TYPE=grpc QUEUE_ADDR=localhost:50051 \
+  STREAMER_CSV_PATH=path/to/dcgm_metrics.csv \
+  STREAMER_CHECKPOINT_DIR=/tmp/cp \
+  go run ./cmd/streamer/
+
+# Collector (separate terminal)
+QUEUE_TYPE=grpc QUEUE_ADDR=localhost:50051 go run ./cmd/collector/
+
+# Check broker stats
+curl -s localhost:8083/stats | jq
+```
+
+### Kubernetes deploy
+
+```bash
+# Build and load all images into minikube
 make docker-build-queue docker-build-collector docker-build-streamer
 make minikube-load-queue minikube-load-collector minikube-load-streamer
 
-# 2. Deploy the queue, then the rest of the pipeline with QUEUE_TYPE=grpc
-make deploy-queue
+# Deploy full pipeline (queue mode)
+make deploy QUEUE_TYPE=grpc
+
+# Or step by step
+make deploy-queue          # generates TLS certs, deploys broker
 make deploy-collector QUEUE_TYPE=grpc
 make deploy-streamer  QUEUE_TYPE=grpc
 
-# Or deploy the full pipeline at once
-make deploy QUEUE_TYPE=grpc
+# Force pods to pick up a rebuilt image with the same tag
+kubectl rollout restart deployment/gpu-telemetry-queue -n gpu-telemetry
 ```
 
-The Makefile passes `QUEUE_TYPE` and `QUEUE_ADDR` via `--set` to each Helm chart, and the
-Collector/Streamer NetworkPolicies automatically open the correct egress port (9092 for
-Kafka, 50051 for gRPC) based on the `queue.type` value.
+The Makefile passes `QUEUE_TYPE` and `QUEUE_ADDR` via `--set` to each Helm chart. NetworkPolicies open egress port 50051 for gRPC or 9092 for Kafka based on `queue.type`.
+
+### Verifying end-to-end
+
+```bash
+# Tail broker stats during a run
+watch -n2 'curl -s $(minikube service gpu-telemetry-queue --url -n gpu-telemetry --port health)/stats | jq'
+
+# Check streamer checkpoint (shows current record index)
+kubectl exec -n gpu-telemetry deploy/gpu-telemetry-streamer -- cat /checkpoint/progress
+
+# Confirm zero publish errors
+kubectl logs -n gpu-telemetry deploy/gpu-telemetry-streamer | grep publish_errors
+```

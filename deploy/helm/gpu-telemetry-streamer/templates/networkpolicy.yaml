@@ -1,9 +1,5 @@
 {{- if .Values.networkPolicy.enabled }}
-# 1) Default-deny is provided by the API chart's policy (podSelector: {} covers
-#    every pod in the namespace). This chart adds only the egress/ingress the
-#    streamer needs. If the streamer is installed without the API chart, apply a
-#    default-deny policy separately.
-# 2) Allow DNS resolution (egress to kube-dns in kube-system).
+# Default-deny is owned by the API chart. These policies add only what the streamer needs.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -28,8 +24,6 @@ spec:
         - protocol: TCP
           port: 53
 ---
-# 3) Allow egress to the queue (Kafka or gRPC). The endpoint may be in- or
-#    out-of-cluster, so the port is opened to any destination.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -53,8 +47,7 @@ spec:
           port: {{ .Values.networkPolicy.kafkaPort }}
         {{- end }}
 ---
-# 4) Allow ingress to the health port. Kubelet probes originate from the node, so
-#    no "from" selector is set (any source may reach the health port only).
+# No "from" selector: kubelet probes arrive from the node IP, not a pod.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

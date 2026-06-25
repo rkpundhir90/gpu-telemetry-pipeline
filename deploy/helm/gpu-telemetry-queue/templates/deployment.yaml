@@ -14,6 +14,8 @@ spec:
       labels:
         {{- include "gpu-telemetry-queue.selectorLabels" . | nindent 8 }}
     spec:
+      # Give in-flight RPCs time to drain before the pod is killed.
+      terminationGracePeriodSeconds: 15
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -34,8 +36,50 @@ spec:
           env:
             - name: QUEUE_LISTEN_ADDR
               value: {{ .Values.env.QUEUE_LISTEN_ADDR | quote }}
+            - name: QUEUE_HEALTH_ADDR
+              value: ":{{ .Values.healthPort }}"
+            - name: QUEUE_MAX_MESSAGES
+              value: {{ .Values.maxMessages | quote }}
+            {{- if .Values.tls.secretName }}
+            - name: GRPC_TLS_CERT_FILE
+              value: /tls/tls.crt
+            - name: GRPC_TLS_KEY_FILE
+              value: /tls/tls.key
+            {{- end }}
           ports:
             - name: grpc
               containerPort: 50051
+            - name: health
+              containerPort: {{ .Values.healthPort }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            failureThreshold: 30
+            periodSeconds: 1
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          {{- if .Values.tls.secretName }}
+          volumeMounts:
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+          {{- end }}
+      {{- if .Values.tls.secretName }}
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ .Values.tls.secretName }}
+      {{- end }}

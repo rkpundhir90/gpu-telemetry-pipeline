@@ -59,8 +59,9 @@ func run(ctx context.Context, cfg config.Streamer, log *slog.Logger) error {
 	defer func() { _ = producer.Close() }()
 
 	str := streamer.New(producer, records, streamer.Config{
-		Interval: cfg.Interval,
-		Loop:     cfg.Loop,
+		Interval:      cfg.Interval,
+		Loop:          cfg.Loop,
+		CheckpointDir: cfg.CheckpointDir,
 	}, log)
 
 	healthSrv := startHealthServer(cfg.HealthAddr, str.Stats(), log)

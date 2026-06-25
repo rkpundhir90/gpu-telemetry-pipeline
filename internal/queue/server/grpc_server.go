@@ -17,43 +17,41 @@ func NewQueueGRPCServer(broker *Broker) *QueueGRPCServer {
 
 func (s *QueueGRPCServer) Produce(ctx context.Context, req *grpc.ProduceRequest) (*grpc.ProduceResponse, error) {
 	topic := s.broker.GetTopic(req.Topic)
-
-	msgs := make([]Message, 0, len(req.Messages))
-	for _, mp := range req.Messages {
-		msgs = append(msgs, Message{
-			Key:   mp.Key,
-			Value: mp.Value,
-		})
+	msgs := make([]Message, len(req.Messages))
+	for i, mp := range req.Messages {
+		msgs[i] = Message{Key: mp.Key, Value: mp.Value}
 	}
-
-	offsets := topic.Produce(msgs)
-
-	return &grpc.ProduceResponse{Offsets: offsets}, nil
+	return &grpc.ProduceResponse{Offsets: topic.Produce(msgs)}, nil
 }
 
-func (s *QueueGRPCServer) Consume(ctx context.Context, req *grpc.ConsumeRequest) (*grpc.ConsumeResponse, error) {
+func (s *QueueGRPCServer) StreamConsume(req *grpc.ConsumeStreamRequest, stream grpc.QueueService_StreamConsumeServer) error {
 	topic := s.broker.GetTopic(req.Topic)
-
-	wait := func() bool { return ctx.Err() == nil }
-
-	msg, offset, err := topic.Consume(req.GroupId, wait)
-	if err != nil {
-		return nil, fmt.Errorf("consume error: %w", err)
+	maxBatch := int(req.MaxBatchSize)
+	if maxBatch <= 0 {
+		maxBatch = 500
 	}
 
-	return &grpc.ConsumeResponse{
-		Key:    msg.Key,
-		Value:  msg.Value,
-		Offset: offset,
-	}, nil
+	for {
+		msgs, err := topic.ConsumeBatch(req.GroupId, maxBatch, stream.Context())
+		if err != nil {
+			return err // context cancelled (shutdown) or permanent error
+		}
+
+		batch := make([]*grpc.BatchedMessage, len(msgs))
+		for i, m := range msgs {
+			batch[i] = &grpc.BatchedMessage{Key: m.Msg.Key, Value: m.Msg.Value, Offset: m.Offset}
+		}
+
+		if err := stream.Send(&grpc.ConsumeStreamResponse{Messages: batch}); err != nil {
+			return err
+		}
+	}
 }
 
 func (s *QueueGRPCServer) Commit(ctx context.Context, req *grpc.CommitRequest) (*grpc.CommitResponse, error) {
 	topic := s.broker.GetTopic(req.Topic)
-	err := topic.Commit(req.GroupId, req.Offset)
-	if err != nil {
+	if err := topic.Commit(req.GroupId, req.Offset); err != nil {
 		return nil, fmt.Errorf("commit error: %w", err)
 	}
-
 	return &grpc.CommitResponse{Success: true}, nil
 }

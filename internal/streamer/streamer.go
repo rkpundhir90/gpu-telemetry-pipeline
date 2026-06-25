@@ -7,6 +7,9 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -14,10 +17,10 @@ import (
 	"gpu-telemetry-pipeline/internal/telemetry"
 )
 
-// Config tunes the replay behaviour of a Streamer.
 type Config struct {
-	Interval time.Duration // per-replica delay between datapoints
-	Loop     bool          // replay the dataset endlessly
+	Interval      time.Duration // per-replica delay between datapoints
+	Loop          bool          // replay the dataset endlessly
+	CheckpointDir string        // directory for progress checkpoint; empty = no checkpoint
 }
 
 func (c *Config) withDefaults() {
@@ -26,20 +29,19 @@ func (c *Config) withDefaults() {
 	}
 }
 
-// Stats are cumulative counters exposed for observability.
 type Stats struct {
 	Streamed    atomic.Int64
 	PublishErrs atomic.Int64
 	Loops       atomic.Int64
 }
 
-// Streamer replays a fixed set of records onto a queue.Producer.
 type Streamer struct {
 	producer queue.Producer
 	records  []telemetry.Record
 	log      *slog.Logger
 	cfg      Config
 	stats    Stats
+	cp       *checkpointer
 }
 
 // Load reads telemetry records from the CSV at path. Timestamps are left zero;
@@ -62,33 +64,51 @@ func New(producer queue.Producer, records []telemetry.Record, cfg Config, log *s
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Streamer{producer: producer, records: records, log: log, cfg: cfg}
+	return &Streamer{
+		producer: producer,
+		records:  records,
+		log:      log,
+		cfg:      cfg,
+		cp:       newCheckpointer(cfg.CheckpointDir),
+	}
 }
 
 func (s *Streamer) Stats() *Stats { return &s.stats }
 
 // Run replays the dataset until ctx is cancelled (or once if Loop is false).
+// If CheckpointDir is set, Run resumes from the last saved position so a pod
+// restart continues from where it left off rather than replaying from the start.
 func (s *Streamer) Run(ctx context.Context) error {
+	startIdx := s.cp.load(len(s.records))
 	s.log.Info("streamer started",
 		"records", len(s.records),
 		"interval", s.cfg.Interval.String(),
 		"loop", s.cfg.Loop,
+		"resume_from", startIdx,
 	)
 
 	ticker := time.NewTicker(s.cfg.Interval)
 	defer ticker.Stop()
 
 	for {
-		for i := range s.records {
+		for i := startIdx; i < len(s.records); i++ {
 			select {
 			case <-ctx.Done():
+				s.cp.save(i) // save position so next start resumes here
 				s.log.Info("streamer stopped", "reason", "context cancelled",
-					"streamed", s.stats.Streamed.Load())
+					"streamed", s.stats.Streamed.Load(), "checkpoint", i)
 				return nil
 			case <-ticker.C:
 			}
 			s.publish(ctx, &s.records[i])
+
+			// Checkpoint every 500 records so restart overhead is bounded.
+			if i > 0 && i%500 == 0 {
+				s.cp.save(i + 1)
+			}
 		}
+		startIdx = 0
+		s.cp.save(0)
 
 		loops := s.stats.Loops.Add(1)
 		s.log.Info("completed dataset pass",
@@ -135,4 +155,42 @@ func (s *Streamer) publish(ctx context.Context, rec *telemetry.Record) {
 			"metric", rec.MetricName,
 		)
 	}
+}
+
+// checkpointer writes the current record index to disk so restarts resume rather than replay.
+// nil is safe (CheckpointDir unset).
+type checkpointer struct {
+	path string
+}
+
+func newCheckpointer(dir string) *checkpointer {
+	if dir == "" {
+		return nil
+	}
+	return &checkpointer{path: filepath.Join(dir, "progress")}
+}
+
+// load returns the saved index, or 0 on any error (missing file, corrupt data,
+// out-of-bounds for current dataset size).
+func (c *checkpointer) load(max int) int {
+	if c == nil {
+		return 0
+	}
+	data, err := os.ReadFile(c.path)
+	if err != nil {
+		return 0
+	}
+	idx, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || idx < 0 || idx >= max {
+		return 0
+	}
+	return idx
+}
+
+// save writes idx; errors are silently discarded (missing checkpoint = replay from 0, not a fatal failure).
+func (c *checkpointer) save(idx int) {
+	if c == nil {
+		return
+	}
+	_ = os.WriteFile(c.path, []byte(strconv.Itoa(idx)), 0600)
 }
