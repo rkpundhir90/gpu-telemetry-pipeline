@@ -23,7 +23,8 @@ spec:
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       initContainers:
-        # Keeps the pod in Init rather than crash-looping until the CSV is present on the PVC.
+        # Block startup until the CSV has been loaded onto the volume, so the pod
+        # waits (Init state) instead of crash-looping if the data isn't there yet.
         - name: wait-for-data
           image: busybox:1.37
           command:
@@ -57,10 +58,12 @@ spec:
               value: {{ .Values.streamer.interval | quote }}
             - name: STREAMER_LOOP
               value: {{ .Values.streamer.loop | quote }}
-            - name: STREAMER_CHECKPOINT_DIR
-              value: {{ .Values.streamer.checkpointDir | quote }}
             - name: STREAMER_HEALTH_ADDR
               value: ":{{ .Values.healthPort }}"
+            {{- if and (eq .Values.queue.type "grpc") .Values.tls.caSecretName }}
+            - name: GRPC_TLS_CA_FILE
+              value: /tls/ca.crt
+            {{- end }}
           ports:
             - name: health
               containerPort: {{ .Values.healthPort }}
@@ -89,17 +92,22 @@ spec:
             - name: data
               mountPath: {{ .Values.csv.mountPath }}
               readOnly: true
-            # readOnlyRootFilesystem requires a writable /tmp.
+            # readOnlyRootFilesystem is true, so give the process a writable /tmp.
             - name: tmp
               mountPath: /tmp
-            # emptyDir survives container restarts; resets on pod eviction (correct behaviour).
-            - name: checkpoint
-              mountPath: {{ .Values.streamer.checkpointDir }}
+            {{- if and (eq .Values.queue.type "grpc") .Values.tls.caSecretName }}
+            - name: queue-ca
+              mountPath: /tls
+              readOnly: true
+            {{- end }}
       volumes:
         - name: data
           persistentVolumeClaim:
             claimName: {{ .Values.csv.claimName }}
         - name: tmp
           emptyDir: {}
-        - name: checkpoint
-          emptyDir: {}
+        {{- if and (eq .Values.queue.type "grpc") .Values.tls.caSecretName }}
+        - name: queue-ca
+          secret:
+            secretName: {{ .Values.tls.caSecretName }}
+        {{- end }}

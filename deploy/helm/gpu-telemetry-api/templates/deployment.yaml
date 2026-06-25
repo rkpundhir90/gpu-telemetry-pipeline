@@ -61,6 +61,16 @@ spec:
             # readOnlyRootFilesystem is true, so give the process a writable /tmp.
             - name: tmp
               mountPath: /tmp
+            {{- if .Values.postgres.tls.caSecretName }}
+            - name: pg-tls
+              mountPath: /pg-tls
+              readOnly: true
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
+        {{- if .Values.postgres.tls.caSecretName }}
+        - name: pg-tls
+          secret:
+            secretName: {{ .Values.postgres.tls.caSecretName }}
+        {{- end }}

@@ -1,10 +1,8 @@
 {{ include "gpu-telemetry-queue.name" . }} deployed to namespace "{{ .Release.Namespace }}".
 
 Service:      {{ include "gpu-telemetry-queue.fullname" . }}:50051 (ClusterIP)
-Health:       {{ include "gpu-telemetry-queue.fullname" . }}:{{ .Values.healthPort }} — /healthz /stats
 Pod Security: restricted (Pod Security Admission)
 TLS:          {{ if .Values.tls.secretName }}enabled (secret: {{ .Values.tls.secretName }}){{ else }}disabled{{ end }}
-Max messages: {{ .Values.maxMessages }} per topic (oldest quarter evicted when full)
 
 Producers and consumers address the queue as:
 
@@ -12,4 +10,3 @@ Producers and consumers address the queue as:
 
 To inspect in-flight state:
   kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/name={{ include "gpu-telemetry-queue.name" . }} --tail=50
-  kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "gpu-telemetry-queue.fullname" . }} -- wget -qO- localhost:{{ .Values.healthPort }}/stats
